@@ -1,0 +1,17 @@
+# Credentials - never commit this
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+
+# Mac
+.DS_Store
+
+# Robinhood cached session token
+data.pickle
