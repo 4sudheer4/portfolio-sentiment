@@ -1,0 +1,36 @@
+This is a fundamental concept often tested in interviews: Docker images are immutable. Once an image is built, it is a "frozen" snapshot of your code at that exact second. Any change to your app.py, requirements.txt, or even a CSS file requires a new build to "bake" those changes into a new image layer.
+
+1. Why the Rebuild is Necessary
+When you ran docker build the first time, Docker executed the command COPY . .. This took a copy of your app.py (which had port 5000) and stored it inside the image.
+
+The Disconnect: If you change app.py on your laptop to port 8080, the version inside the existing image still says 5000.
+
+The Result: If you run the old image, it will still try to start on port 5000, and your docker run -p 8080:8080 command will fail because nothing is listening on 8080 inside the container.
+
+2. The Efficient Way to Rebuild
+Run the build command again. Docker is smart—it will use Layer Caching for your dependencies (pip install), so the second build will be much faster than the first because it only needs to update the "Copy Code" layer.
+
+Bash
+docker build -t sentiment-app .
+3. Interview Prep: "Image Immutability"
+If an interviewer asks: "If I change a configuration file in my source code, do I need to re-push to ECR?"
+
+The Correct Answer:
+
+"Yes, because Docker images are immutable. Any change to the source code requires a new build to create a new image ID. In a CI/CD pipeline, this ensures that the exact code we tested is what gets deployed to AWS, preventing 'configuration drift' between environments."
+
+Common Follow-up: "What if I don't want to rebuild for every little change?"
+In a professional fintech environment, for things like Ports or API Keys, we use Environment Variables.
+
+Instead of hardcoding 8080 in app.py, you use os.getenv("PORT", 5000).
+
+This way, you can build the image once and just change the port at runtime using docker run -e PORT=8080.
+
+Check your metadata one more time after the rebuild:
+Run docker inspect sentiment-app and look at the Created timestamp. It should match the current time, proving you are now looking at the new "8080" version of your project.
+
+
+-----
+
+to check if image has updated code run the following command:
+docker run --rm sentiment-app cat app.py
