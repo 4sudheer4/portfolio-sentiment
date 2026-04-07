@@ -1,9 +1,8 @@
-flask==3.0.3
-python-dotenv==1.0.1
-robin-stocks==3.0.4
-yfinance==0.2.40
-transformers==4.40.0
---index-url https://download.pytorch.org/whl/cpu
-torch==2.3.0+cpu
-pandas==2.2.2
-requests==2.32.3
+flask
+python-dotenv
+robin-stocks
+yfinance
+transformers
+pandas
+requests
+torch --index-url https://download.pytorch.org/whl/cpu
