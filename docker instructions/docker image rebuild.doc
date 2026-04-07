@@ -11,7 +11,27 @@ The Result: If you run the old image, it will still try to start on port 5000, a
 Run the build command again. Docker is smart—it will use Layer Caching for your dependencies (pip install), so the second build will be much faster than the first because it only needs to update the "Copy Code" layer.
 
 Bash
-docker build -t sentiment-app .
+docker ps -a
+--to check all containers, even stopped
+
+docker stop sentiment-app
+docker rm sentiment-app
+docker build -t sentiment-app . //builds image.
+docker run -d -p 8080:5000 --env-file .env 
+
+/*
+docker run both creates AND starts the container from the image:
+docker build    →   creates the IMAGE
+docker run      →   creates + starts the CONTAINER from that image
+So you never "build" a container separately — docker run handles that in one step.
+Think of it like:
+Image    = the recipe
+Container = the meal made from that recipe
+
+docker build = write the recipe
+docker run   = cook the meal
+*/
+
 3. Interview Prep: "Image Immutability"
 If an interviewer asks: "If I change a configuration file in my source code, do I need to re-push to ECR?"
 
