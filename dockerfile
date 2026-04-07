@@ -1,27 +1,35 @@
-# Start with an official Python 3.11 image as the base
-# (like starting with a fresh Linux machine that has Python pre-installed)
+# ── Base image ────────────────────────────────────────────────────────────────
+# Python 3.11 slim keeps the image small while supporting all dependencies
 FROM python:3.11-slim
 
-# Set the working directory inside the container
-# (like doing: mkdir /app && cd /app)
+# ── System dependencies ───────────────────────────────────────────────────────
+# gcc/g++ needed to compile some transformers/torch native extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Working directory ─────────────────────────────────────────────────────────
 WORKDIR /app
 
-# Copy requirements.txt from your Mac into the container
+# ── Python dependencies ───────────────────────────────────────────────────────
 COPY requirements.txt .
-
-# Install all your Python packages inside the container
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download the VADER sentiment dictionary
-RUN python -m nltk.downloader vader_lexicon
+# ── Pre-download FinBERT model at build time ──────────────────────────────────
+# This bakes the ~440 MB model into the image so the first request is fast.
+# Remove this block if you prefer to download at runtime to keep image smaller.
+RUN python -c "\
+from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+AutoTokenizer.from_pretrained('ProsusAI/finbert'); \
+AutoModelForSequenceClassification.from_pretrained('ProsusAI/finbert')"
 
-# Copy the rest of your code into the container
-COPY . .
+# ── App source ────────────────────────────────────────────────────────────────
+COPY app.py .
+COPY .env .
 
-# Tell Docker your app listens on port 5000
-# (just documentation — doesn't actually open the port)
-EXPOSE 5000
+# ── Port ──────────────────────────────────────────────────────────────────────
+EXPOSE 8080
 
-# The command to run when the container starts
-# gunicorn is a production-grade server, better than Flask's built-in one
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+# ── Run ───────────────────────────────────────────────────────────────────────
+CMD ["python", "app.py"]
