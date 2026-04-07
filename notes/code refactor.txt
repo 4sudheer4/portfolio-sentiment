@@ -1,0 +1,11 @@
+refactor the app with both FinBERT (finance-specific NLP) and blended scoring (sentiment + price momentum).Viewed a file, created a file, read a fileViewed a file, created a file, read a fileHere's what changed and why each fix matters:
+FinBERT replaces VADER
+ProsusAI/finbert is trained on financial news and analyst reports. It understands phrases like "beats estimates", "guidance cut", "margin pressure" — things VADER completely misreads.
+Confidence-weighted scoring
+Each headline is weighted by the model's own confidence score, so a 95%-confident "positive" counts much more than a weak 52%-confident one.
+Recency decay
+Headlines are half-weighted every 3 days using providerPublishTime. Last week's bad news won't tank a stock that recovered yesterday.
+Blended signal (55% NLP / 45% momentum)
+Price momentum is normalised to [-1, 1] (capped at ±20% move) so one outlier doesn't dominate. The final score reflects both narrative and actual market behavior.
+New thresholds
+Moved from ±0.05 to ±0.15 to reduce false positives — the combined score is more meaningful so a higher bar makes sense.
