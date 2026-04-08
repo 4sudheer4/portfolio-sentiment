@@ -1,26 +1,26 @@
-FROM python:3.11-slim
+# ── Stage 1: install deps ──────────────────────────────
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Minimal system deps only
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+RUN apt-get update && apt-get install -y --no-install-recommends gcc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# ⚡ CPU-only PyTorch — biggest memory saving (~1.8 GB less than full build)
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --prefix=/install \
     torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install everything else
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
+# ── Stage 2: lean runtime image ───────────────────────
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
 COPY . .
 
 EXPOSE 5000
-
-# 1 worker = FinBERT loads once, not once per worker
-# 2 threads = handles concurrent requests without extra RAM
-# timeout=120 = gives FinBERT time to load on cold start
 CMD ["gunicorn", "--workers=1", "--threads=2", "--timeout=120", "--bind=0.0.0.0:5000", "app:app"]
