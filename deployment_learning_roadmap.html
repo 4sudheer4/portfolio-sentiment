@@ -1,0 +1,323 @@
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font-sans); }
+  .roadmap { padding: 16px 0; }
+  .phase { margin-bottom: 12px; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); overflow: hidden; }
+  .phase-header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; user-select: none; background: var(--color-background-secondary); }
+  .phase-header:hover { background: var(--color-background-tertiary); }
+  .phase-num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 500; flex-shrink: 0; }
+  .phase-title { flex: 1; }
+  .phase-title h3 { font-size: 14px; font-weight: 500; color: var(--color-text-primary); }
+  .phase-title p { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; }
+  .phase-badge { font-size: 11px; padding: 3px 10px; border-radius: 20px; font-weight: 500; }
+  .chevron { font-size: 12px; color: var(--color-text-tertiary); transition: transform 0.2s; }
+  .phase-body { padding: 0 16px; max-height: 0; overflow: hidden; transition: max-height 0.3s ease, padding 0.3s; }
+  .phase-body.open { max-height: 600px; padding: 14px 16px; }
+  .step { display: flex; gap: 12px; margin-bottom: 12px; }
+  .step:last-child { margin-bottom: 0; }
+  .step-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+  .step-content h4 { font-size: 13px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 3px; }
+  .step-content p { font-size: 12px; color: var(--color-text-secondary); line-height: 1.5; }
+  .step-content code { font-family: var(--font-mono); font-size: 11px; background: var(--color-background-tertiary); padding: 1px 5px; border-radius: 4px; color: var(--color-text-primary); }
+  .divider { border: none; border-top: 0.5px solid var(--color-border-tertiary); margin: 10px 0; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 12px; margin-right: 4px; margin-top: 4px; }
+
+  .p1-num { background: #E6F1FB; color: #0C447C; }
+  .p1-badge { background: #E6F1FB; color: #185FA5; }
+  .p1-icon { background: #E6F1FB; }
+
+  .p2-num { background: #EAF3DE; color: #27500A; }
+  .p2-badge { background: #EAF3DE; color: #3B6D11; }
+  .p2-icon { background: #EAF3DE; }
+
+  .p3-num { background: #FAEEDA; color: #633806; }
+  .p3-badge { background: #FAEEDA; color: #854F0B; }
+  .p3-icon { background: #FAEEDA; }
+
+  .p4-num { background: #E1F5EE; color: #085041; }
+  .p4-badge { background: #E1F5EE; color: #0F6E56; }
+  .p4-icon { background: #E1F5EE; }
+
+  .p5-num { background: #EEEDFE; color: #3C3489; }
+  .p5-badge { background: #EEEDFE; color: #534AB7; }
+  .p5-icon { background: #EEEDFE; }
+
+  @media (prefers-color-scheme: dark) {
+    .p1-num { background: #0C447C; color: #B5D4F4; }
+    .p1-badge { background: #0C447C; color: #B5D4F4; }
+    .p1-icon { background: #0C447C; }
+    .p2-num { background: #27500A; color: #C0DD97; }
+    .p2-badge { background: #27500A; color: #C0DD97; }
+    .p2-icon { background: #27500A; }
+    .p3-num { background: #633806; color: #FAC775; }
+    .p3-badge { background: #633806; color: #FAC775; }
+    .p3-icon { background: #633806; }
+    .p4-num { background: #085041; color: #9FE1CB; }
+    .p4-badge { background: #085041; color: #9FE1CB; }
+    .p4-icon { background: #085041; }
+    .p5-num { background: #3C3489; color: #CECBF6; }
+    .p5-badge { background: #3C3489; color: #CECBF6; }
+    .p5-icon { background: #3C3489; }
+  }
+</style>
+
+<div class="roadmap">
+
+  <div style="margin-bottom: 16px; padding: 0 2px;">
+    <p style="font-size: 13px; color: var(--color-text-secondary); line-height: 1.6;">Click each phase to expand. Complete them in order — each builds on the last.</p>
+  </div>
+
+  <!-- Phase 1 -->
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-num p1-num">1</div>
+      <div class="phase-title">
+        <h3>Git & GitHub</h3>
+        <p>Version control — your code's home base</p>
+      </div>
+      <span class="phase-badge p1-badge">~1 day</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <div class="step-icon p1-icon">📁</div>
+        <div class="step-content">
+          <h4>What to learn</h4>
+          <p><code>git init</code>, <code>git add</code>, <code>git commit</code>, <code>git push</code> — the four commands you'll use every single day.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p1-icon">🎯</div>
+        <div class="step-content">
+          <h4>Goal</h4>
+          <p>Push your sentiment analyzer code to a public GitHub repo. This is your portfolio piece.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p1-icon">📚</div>
+        <div class="step-content">
+          <h4>Resources</h4>
+          <p>GitHub's own <code>docs.github.com</code> quickstart is the best. Takes 30 minutes.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p1-icon">🏷️</div>
+        <div class="step-content">
+          <h4>Interview value</h4>
+          <p>Every single tech job requires this. Non-negotiable baseline.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 2 -->
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-num p2-num">2</div>
+      <div class="phase-title">
+        <h3>Docker</h3>
+        <p>Package your app so it runs anywhere</p>
+      </div>
+      <span class="phase-badge p2-badge">~2 days</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <div class="step-icon p2-icon">🧠</div>
+        <div class="step-content">
+          <h4>Core concept</h4>
+          <p>A Docker container is like a lunch box — it packs your app + all its dependencies together so it works the same on your laptop, a server, or anyone else's machine.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p2-icon">📄</div>
+        <div class="step-content">
+          <h4>What to learn</h4>
+          <p>Write a <code>Dockerfile</code>. Learn <code>docker build</code>, <code>docker run</code>, <code>docker ps</code>. Run your Flask app inside a container locally first.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p2-icon">🎯</div>
+        <div class="step-content">
+          <h4>Goal</h4>
+          <p>Run your sentiment app via <code>docker run -p 5000:5000 sentiment-app</code> and see it open in your browser.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p2-icon">🏷️</div>
+        <div class="step-content">
+          <h4>Interview value</h4>
+          <p>Asked in almost every backend/DevOps interview. "Explain Docker vs VM" is a classic question.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 3 -->
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-num p3-num">3</div>
+      <div class="phase-title">
+        <h3>AWS EC2</h3>
+        <p>Rent a server in the cloud</p>
+      </div>
+      <span class="phase-badge p3-badge">~2 days</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <div class="step-icon p3-icon">🧠</div>
+        <div class="step-content">
+          <h4>Core concept</h4>
+          <p>EC2 is just a Linux computer you rent from Amazon. The <code>t2.micro</code> instance is free for 12 months — perfect for learning.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p3-icon">📄</div>
+        <div class="step-content">
+          <h4>What to learn</h4>
+          <p>Launch an EC2 instance. SSH into it with your <code>.pem</code> key. Install Docker on it. Understand Security Groups (firewall rules).</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p3-icon">🎯</div>
+        <div class="step-content">
+          <h4>Goal</h4>
+          <p>SSH into your EC2 instance, pull your GitHub repo, run your Docker container, and access your app via the EC2 public IP on your phone.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p3-icon">🏷️</div>
+        <div class="step-content">
+          <h4>Interview value</h4>
+          <p>AWS is #1 cloud provider. EC2 knowledge alone puts you ahead of many candidates. Pair with IAM basics for bonus points.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 4 -->
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-num p4-num">4</div>
+      <div class="phase-title">
+        <h3>Nginx</h3>
+        <p>A proper web server in front of Flask</p>
+      </div>
+      <span class="phase-badge p4-badge">~1 day</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <div class="step-icon p4-icon">🧠</div>
+        <div class="step-content">
+          <h4>Core concept</h4>
+          <p>Flask's built-in server is for development only. Nginx sits in front and forwards traffic to your app — this is called a reverse proxy. It also handles HTTPS.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p4-icon">📄</div>
+        <div class="step-content">
+          <h4>What to learn</h4>
+          <p>Write an Nginx config with <code>proxy_pass</code>. Enable it with <code>sites-enabled</code>. Understand ports 80 vs 443.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p4-icon">🎯</div>
+        <div class="step-content">
+          <h4>Goal</h4>
+          <p>Access your app via <code>http://YOUR_EC2_IP</code> (no port number) — Nginx routes it cleanly to Flask.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p4-icon">🏷️</div>
+        <div class="step-content">
+          <h4>Interview value</h4>
+          <p>"What is a reverse proxy?" is asked constantly. Now you've actually configured one.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 5 -->
+  <div class="phase">
+    <div class="phase-header" onclick="toggle(this)">
+      <div class="phase-num p5-num">5</div>
+      <div class="phase-title">
+        <h3>CI/CD with GitHub Actions</h3>
+        <p>Auto-deploy on every git push</p>
+      </div>
+      <span class="phase-badge p5-badge">~2 days</span>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <div class="step-icon p5-icon">🧠</div>
+        <div class="step-content">
+          <h4>Core concept</h4>
+          <p>Every time you do <code>git push</code>, GitHub automatically builds your Docker image, SSHes into EC2, and restarts your app. Zero manual steps.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p5-icon">📄</div>
+        <div class="step-content">
+          <h4>What to learn</h4>
+          <p>Write a <code>.github/workflows/deploy.yml</code> file. Learn about GitHub Secrets for storing your EC2 credentials safely.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p5-icon">🎯</div>
+        <div class="step-content">
+          <h4>Goal</h4>
+          <p>Edit a line of code, push to GitHub, wait 2 minutes, and see the change live on your phone — automatically.</p>
+        </div>
+      </div>
+      <hr class="divider">
+      <div class="step">
+        <div class="step-icon p5-icon">🏷️</div>
+        <div class="step-content">
+          <h4>Interview value</h4>
+          <p>CI/CD is the #1 DevOps concept asked about in interviews. This makes your resume line "built CI/CD pipeline" actually true and explainable.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: 16px; padding: 12px 14px; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); background: var(--color-background-secondary);">
+    <p style="font-size: 12px; color: var(--color-text-secondary); line-height: 1.6;">
+      <strong style="color: var(--color-text-primary); font-weight: 500;">Total time:</strong> ~8 days at a comfortable learning pace &nbsp;·&nbsp;
+      <strong style="color: var(--color-text-primary); font-weight: 500;">Resume line:</strong> Python · Flask · Docker · AWS EC2 · Nginx · GitHub Actions
+    </p>
+  </div>
+</div>
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  const chevron = header.querySelector('.chevron');
+  const isOpen = body.classList.contains('open');
+  document.querySelectorAll('.phase-body.open').forEach(b => {
+    b.classList.remove('open');
+    b.previousElementSibling.querySelector('.chevron').style.transform = 'rotate(0deg)';
+  });
+  if (!isOpen) {
+    body.classList.add('open');
+    chevron.style.transform = 'rotate(180deg)';
+  }
+}
+</script>

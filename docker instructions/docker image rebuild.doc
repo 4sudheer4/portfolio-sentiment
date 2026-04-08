@@ -18,6 +18,8 @@ docker stop sentiment-app
 docker rm sentiment-app
 docker build -t sentiment-app . //builds image.
 docker run -d -p 8080:5000 --env-file .env 
+or
+docker run -d -p 8080:5000 --env-file .env --name sentiment-app sentiment-app
 
 /*
 docker run both creates AND starts the container from the image:

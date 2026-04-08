@@ -1,8 +1,8 @@
 flask
+gunicorn
 python-dotenv
 robin-stocks
 yfinance
 transformers
-pandas
-requests
-torch --index-url https://download.pytorch.org/whl/cpu
+accelerate
+sentencepiece

@@ -1,35 +1,26 @@
-# ── Base image ────────────────────────────────────────────────────────────────
-# Python 3.11 slim keeps the image small while supporting all dependencies
 FROM python:3.11-slim
 
-# ── System dependencies ───────────────────────────────────────────────────────
-# gcc/g++ needed to compile some transformers/torch native extensions
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Working directory ─────────────────────────────────────────────────────────
 WORKDIR /app
 
-# ── Python dependencies ───────────────────────────────────────────────────────
+# Minimal system deps only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
+
+# ⚡ CPU-only PyTorch — biggest memory saving (~1.8 GB less than full build)
+RUN pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install everything else
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Pre-download FinBERT model at build time ──────────────────────────────────
-# This bakes the ~440 MB model into the image so the first request is fast.
-# Remove this block if you prefer to download at runtime to keep image smaller.
-RUN python -c "\
-from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
-AutoTokenizer.from_pretrained('ProsusAI/finbert'); \
-AutoModelForSequenceClassification.from_pretrained('ProsusAI/finbert')"
+COPY . .
 
-# ── App source ────────────────────────────────────────────────────────────────
-COPY app.py .
-COPY .env .
+EXPOSE 5000
 
-# ── Port ──────────────────────────────────────────────────────────────────────
-EXPOSE 8080
-
-# ── Run ───────────────────────────────────────────────────────────────────────
-CMD ["python", "app.py"]
+# 1 worker = FinBERT loads once, not once per worker
+# 2 threads = handles concurrent requests without extra RAM
+# timeout=120 = gives FinBERT time to load on cold start
+CMD ["gunicorn", "--workers=1", "--threads=2", "--timeout=120", "--bind=0.0.0.0:5000", "app:app"]

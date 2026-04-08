@@ -14,4 +14,5 @@ venv/
 .DS_Store
 
 # Robinhood cached session token
-data.pickle
+data.pickle.claude/worktrees/
+.claude/worktrees/
