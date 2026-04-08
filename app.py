@@ -184,7 +184,7 @@ def report():
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'DM Mono', monospace;
+      font-family: ui-monospace, 'SF Mono', monospace;
       min-height: 100vh;
       padding: 28px 16px 60px;
     }
@@ -195,7 +195,7 @@ def report():
       margin: 0 auto 28px;
     }
     header h1 {
-      font-family: 'Syne', sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
       font-size: 1.6rem;
       font-weight: 800;
       letter-spacing: -0.5px;
@@ -259,7 +259,7 @@ def report():
       align-items: baseline;
     }
     .ticker {
-      font-family: 'Syne', sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
       font-size: 1.25rem;
       font-weight: 800;
       letter-spacing: 0.5px;
