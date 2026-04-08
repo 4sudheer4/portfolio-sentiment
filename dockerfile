@@ -1,26 +1,25 @@
-FROM python:3.10-slim
+FROM --platform=linux/amd64 python:3.10-slim
 
 WORKDIR /app
 
-# Install system deps cleanly
 RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
+    gcc g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CPU-only PyTorch FIRST (before other requirements)
-# This prevents pip from pulling the 2.5GB CUDA version
 RUN pip install --no-cache-dir \
-    torch==2.1.0 \
-    --index-url https://download.pytorch.org/whl/cpu
+    torch==2.6.0 \
+    --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Install transformers and other deps
+RUN pip install --no-cache-dir "numpy<2"
+
 COPY requirements.txt .
-
-# Make sure requirements.txt does NOT have torch in it
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
+# Pre-download FinBERT so first request isn't slow
+RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+    AutoTokenizer.from_pretrained('ProsusAI/finbert'); \
+    AutoModelForSequenceClassification.from_pretrained('ProsusAI/finbert')"
+
 COPY . .
 
 EXPOSE 5000

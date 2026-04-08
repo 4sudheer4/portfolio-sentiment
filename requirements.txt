@@ -1,8 +1,9 @@
 flask
 gunicorn
 python-dotenv
-robin-stocks
-yfinance
 transformers
-accelerate
-sentencepiece
+robin_stocks
+yfinance
+pandas
+numpy<2
+requests
