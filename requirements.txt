@@ -1,7 +1,6 @@
 flask
 gunicorn
 python-dotenv
-transformers
 robin_stocks
 yfinance
 pandas
