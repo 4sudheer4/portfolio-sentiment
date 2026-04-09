@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Prevent yfinance SQLite lock conflicts with threading
 try:
     from yfinance import set_tz_cache_location
-    set_tz_cache_location(None)
+    set_tz_cache_location("/tmp/yfinance")
 except Exception:
     pass
 
