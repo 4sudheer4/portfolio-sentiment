@@ -1,0 +1,33 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd portfolio-sentiment
+            git pull
+            docker stop sentiment-app || true
+            docker rm sentiment-app || true
+            docker build -t sentiment-app .
+            docker run -d \
+              -p 8080:5000 \
+              --env-file .env \
+              --name sentiment-app \
+              --restart always \
+              sentiment-app
