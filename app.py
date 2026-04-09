@@ -6,6 +6,8 @@ from flask import Flask, render_template_string
 from dotenv import load_dotenv
 from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 import torch
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 load_dotenv()
 
@@ -132,32 +134,41 @@ def report():
     if not holdings:
         return "<p>No holdings found or session expired.</p>", 404
 
-    rows = []
-    for ticker in holdings.keys():
-        print(f"Analyzing {ticker}…")
+
+
+        
+    def analyze_ticker(ticker):
         sent_score = get_finbert_sentiment(ticker)
         mom        = get_price_momentum(ticker)
         final      = combined_signal(sent_score, mom["score"])
-
         if final >= 0.15:
-            sentiment, action, color, tier = "Bullish",  "HODL / Accumulate",         "#22c55e", "bull"
+            sentiment, action, color, tier = "Bullish",  "HODL / Accumulate",       "#22c55e", "bull"
         elif final <= -0.15:
-            sentiment, action, color, tier = "Bearish",  "Review Sell / Stop-Loss",   "#ef4444", "bear"
+            sentiment, action, color, tier = "Bearish",  "Review Sell / Stop-Loss", "#ef4444", "bear"
         else:
-            sentiment, action, color, tier = "Neutral",  "Maintain Position",         "#f59e0b", "neutral"
-
-        rows.append({
-            "ticker":    ticker,
-            "sentiment": sentiment,
-            "action":    action,
-            "color":     color,
-            "tier":      tier,
+            sentiment, action, color, tier = "Neutral",  "Maintain Position",       "#f59e0b", "neutral"
+        return {
+            "ticker":      ticker,
+            "sentiment":   sentiment,
+            "action":      action,
+            "color":       color,
+            "tier":        tier,
             "sent_score":  sent_score,
             "mom_pct":     mom["pct"],
             "final_score": final,
-        })
+        }
+    
+    rows = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(analyze_ticker, t): t for t in holdings.keys()}
+        for future in as_completed(futures):
+            try:
+                rows.append(future.result())
+            except Exception as e:
+                print(f"  Error analyzing ticker: {e}")
 
     rows.sort(key=lambda x: x["final_score"], reverse=True)
+    
 
     html = """
 <!DOCTYPE html>
