@@ -4,6 +4,7 @@ import os
 import time
 import requests
 from flask import Flask, render_template_string
+from flask_socketio import SocketIO
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,7 +17,8 @@ except Exception:
 
 load_dotenv()
 
-app = Flask(__name__)
+app    = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 HF_API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
 HF_TOKEN   = os.getenv("HF_TOKEN")
@@ -26,7 +28,7 @@ LABEL_TO_SCORE = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 # ── Cache ────────────────────────────────────────────────────────────────────
 _cache     = {"data": None, "ts": 0}
 _logged_in = False
-CACHE_TTL  = 1800  # 30 minutes
+CACHE_TTL  = 1800
 
 # ── Robinhood login ──────────────────────────────────────────────────────────
 def login_to_robinhood():
@@ -36,11 +38,7 @@ def login_to_robinhood():
     username = os.getenv("RH_USERNAME")
     password = os.getenv("RH_PASSWORD")
     if not username or not password:
-        raise ValueError(
-            "Missing credentials. Create a .env file with:\n"
-            "  RH_USERNAME=your_email\n"
-            "  RH_PASSWORD=your_password"
-        )
+        raise ValueError("Missing credentials.")
     rh.login(username, password, store_session=True)
     _logged_in = True
     print("Logged into Robinhood.")
@@ -132,65 +130,15 @@ def combined_signal(sentiment_score: float, momentum_score: float) -> float:
         SENTIMENT_WEIGHT * sentiment_score + MOMENTUM_WEIGHT * momentum_score, 4
     )
 
-# ── Flask route ──────────────────────────────────────────────────────────────
-@app.route("/")
-def report():
-    global _cache
-
-    # Serve from cache if fresh
-    if _cache["data"] and (time.time() - _cache["ts"]) < CACHE_TTL:
-        print("Serving from cache")
-        return _cache["data"]
-
-    try:
-        login_to_robinhood()
-    except ValueError as e:
-        return f"<pre style='color:red'>{e}</pre>", 500
-
-    holdings = rh.account.build_holdings()
-    if not holdings:
-        return "<p>No holdings found or session expired.</p>", 404
-
-    def analyze_ticker(ticker):
-        sent_score = get_finbert_sentiment(ticker)
-        mom        = get_price_momentum(ticker)
-        final      = combined_signal(sent_score, mom["score"])
-        if final >= 0.15:
-            sentiment, action, color, tier = "Bullish",  "HODL / Accumulate",       "#22c55e", "bull"
-        elif final <= -0.15:
-            sentiment, action, color, tier = "Bearish",  "Review Sell / Stop-Loss", "#ef4444", "bear"
-        else:
-            sentiment, action, color, tier = "Neutral",  "Maintain Position",       "#f59e0b", "neutral"
-        return {
-            "ticker":      ticker,
-            "sentiment":   sentiment,
-            "action":      action,
-            "color":       color,
-            "tier":        tier,
-            "sent_score":  sent_score,
-            "mom_pct":     mom["pct"],
-            "final_score": final,
-        }
-
-    rows = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(analyze_ticker, t): t for t in holdings.keys()}
-        for future in as_completed(futures):
-            try:
-                rows.append(future.result())
-            except Exception as e:
-                print(f"  Error: {e}")
-
-    rows.sort(key=lambda x: x["final_score"], reverse=True)
-
-    html = """
+# ── HTML template ─────────────────────────────────────────────────────────────
+HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Portfolio Signal</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
   <style>
     :root {
@@ -205,11 +153,9 @@ def report():
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: var(--bg);
-      color: var(--text);
+      background: var(--bg); color: var(--text);
       font-family: ui-monospace, 'SF Mono', monospace;
-      min-height: 100vh;
-      padding: 28px 16px 60px;
+      min-height: 100vh; padding: 28px 16px 60px;
     }
     header { max-width: 480px; margin: 0 auto 28px; }
     header h1 {
@@ -218,10 +164,23 @@ def report():
     }
     header h1 span { color: var(--bull); }
     .meta { margin-top: 6px; font-size: 0.7rem; color: var(--muted); }
+    .status {
+      max-width: 480px; margin: 0 auto 16px;
+      font-size: 0.72rem; color: var(--muted);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .status-dot.live { background: var(--bull); animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+    }
     .legend {
       max-width: 480px; margin: 0 auto 20px;
-      display: flex; gap: 16px;
-      font-size: 0.68rem; color: var(--muted);
+      display: flex; gap: 16px; font-size: 0.68rem; color: var(--muted);
     }
     .legend-dot {
       display: inline-block; width: 7px; height: 7px;
@@ -232,7 +191,10 @@ def report():
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 14px; padding: 16px 18px; margin-bottom: 10px;
       position: relative; overflow: hidden;
+      opacity: 0; transform: translateY(12px);
+      transition: opacity 0.4s ease, transform 0.4s ease;
     }
+    .card.visible { opacity: 1; transform: translateY(0); }
     .card::before {
       content: ''; position: absolute;
       left: 0; top: 0; bottom: 0; width: 3px;
@@ -247,10 +209,7 @@ def report():
       font-size: 1.25rem; font-weight: 800;
     }
     .final-score { font-size: 1.1rem; font-weight: 500; }
-    .sub-row {
-      display: flex; gap: 14px; margin-top: 10px;
-      font-size: 0.7rem; color: var(--muted);
-    }
+    .sub-row { display: flex; gap: 14px; margin-top: 10px; font-size: 0.7rem; color: var(--muted); }
     .badge {
       display: inline-flex; align-items: center; gap: 5px;
       margin-top: 10px; padding: 4px 10px;
@@ -273,52 +232,154 @@ def report():
 <body>
 <header>
   <h1>Portfolio <span>Signal</span></h1>
-  <p class="meta">FinBERT NLP (HuggingFace API) · 5-day momentum · blended 55/45 · cached 30 min</p>
+  <p class="meta">FinBERT NLP · 5-day momentum · blended 55/45</p>
 </header>
+
+<div class="status">
+  <div class="status-dot" id="status-dot"></div>
+  <span id="status-text">Connecting...</span>
+</div>
+
 <div class="legend">
   <span><span class="legend-dot" style="background:var(--bull)"></span>Bullish ≥ 0.15</span>
   <span><span class="legend-dot" style="background:var(--neutral)"></span>Neutral</span>
   <span><span class="legend-dot" style="background:var(--bear)"></span>Bearish ≤ -0.15</span>
 </div>
-<div class="cards">
-{% for r in rows %}
-<div class="card {{ r.tier }}">
-  <div class="card-row">
-    <span class="ticker">{{ r.ticker }}</span>
-    <span class="final-score" style="color:{{ r.color }}">{{ r.final_score }}</span>
-  </div>
-  <div class="sub-row">
-    <span>NLP <strong>{{ r.sent_score }}</strong></span>
-    <span>5d momentum <strong style="color:{% if r.mom_pct >= 0 %}var(--bull){% else %}var(--bear){% endif %}">
-      {% if r.mom_pct >= 0 %}+{% endif %}{{ r.mom_pct }}%
-    </strong></span>
-  </div>
-  <div class="bar-track">
-    <div class="bar-fill"
-         style="width:{{ ((r.final_score + 1) / 2 * 100)|round|int }}%;
-                background:{{ r.color }}44; border:1px solid {{ r.color }};">
-    </div>
-  </div>
-  <span class="badge" style="background:{{ r.color }}18; color:{{ r.color }};">
-    <span class="badge-dot" style="background:{{ r.color }}"></span>
-    {{ r.sentiment }}
-  </span>
-  <div class="action">{{ r.action }}</div>
-</div>
-{% endfor %}
-</div>
+
+<div class="cards" id="cards"></div>
+
 <footer>
-  Scores are informational only — not financial advice. V2<br/>
+  Scores are informational only — not financial advice.<br/>
   <a href="/">Refresh</a> to pull latest data.
 </footer>
+
+<script>
+  const socket = io();
+  const dot    = document.getElementById('status-dot');
+  const status = document.getElementById('status-text');
+  const cards  = document.getElementById('cards');
+
+  socket.on('connect', () => {
+    dot.classList.add('live');
+    status.textContent = 'Analyzing portfolio...';
+    socket.emit('start_analysis');
+  });
+
+  socket.on('ticker_result', (data) => {
+    status.textContent = `Analyzed ${data.ticker}...`;
+    const bar = Math.round(((data.final_score + 1) / 2) * 100);
+    const card = document.createElement('div');
+    card.className = `card ${data.tier}`;
+    card.innerHTML = `
+      <div class="card-row">
+        <span class="ticker">${data.ticker}</span>
+        <span class="final-score" style="color:${data.color}">${data.final_score}</span>
+      </div>
+      <div class="sub-row">
+        <span>NLP <strong>${data.sent_score}</strong></span>
+        <span>5d momentum <strong style="color:${data.mom_pct >= 0 ? 'var(--bull)' : 'var(--bear)'}">${data.mom_pct >= 0 ? '+' : ''}${data.mom_pct}%</strong></span>
+      </div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${bar}%; background:${data.color}44; border:1px solid ${data.color};"></div>
+      </div>
+      <span class="badge" style="background:${data.color}18; color:${data.color};">
+        <span class="badge-dot" style="background:${data.color}"></span>
+        ${data.sentiment}
+      </span>
+      <div class="action">${data.action}</div>
+    `;
+    cards.appendChild(card);
+    // Trigger animation
+    requestAnimationFrame(() => card.classList.add('visible'));
+  });
+
+  socket.on('analysis_complete', () => {
+    dot.classList.remove('live');
+    status.textContent = 'Analysis complete';
+    // Sort cards by final score
+    const allCards = [...cards.querySelectorAll('.card')];
+    allCards.sort((a, b) => {
+      const scoreA = parseFloat(a.querySelector('.final-score').textContent);
+      const scoreB = parseFloat(b.querySelector('.final-score').textContent);
+      return scoreB - scoreA;
+    });
+    allCards.forEach(c => cards.appendChild(c));
+  });
+
+  socket.on('error', (data) => {
+    dot.style.background = 'var(--bear)';
+    status.textContent = `Error: ${data.message}`;
+  });
+</script>
 </body>
 </html>
 """
-    result = render_template_string(html, rows=rows)
-    _cache = {"data": result, "ts": time.time()}
-    return result
+
+# ── Flask route ──────────────────────────────────────────────────────────────
+@app.route("/")
+def index():
+    return render_template_string(HTML)
+
+# ── WebSocket event ──────────────────────────────────────────────────────────
+@socketio.on("start_analysis")
+def handle_analysis():
+    global _cache
+
+    # Serve from cache if fresh
+    if _cache["data"] and (time.time() - _cache["ts"]) < CACHE_TTL:
+        print("Serving from cache")
+        for row in _cache["data"]:
+            socketio.emit("ticker_result", row)
+        socketio.emit("analysis_complete")
+        return
+
+    try:
+        login_to_robinhood()
+    except Exception as e:
+        socketio.emit("error", {"message": str(e)})
+        return
+
+    holdings = rh.account.build_holdings()
+    if not holdings:
+        socketio.emit("error", {"message": "No holdings found."})
+        return
+
+    def analyze_ticker(ticker):
+        sent_score = get_finbert_sentiment(ticker)
+        mom        = get_price_momentum(ticker)
+        final      = combined_signal(sent_score, mom["score"])
+        if final >= 0.15:
+            sentiment, action, color, tier = "Bullish",  "HODL / Accumulate",       "#22c55e", "bull"
+        elif final <= -0.15:
+            sentiment, action, color, tier = "Bearish",  "Review Sell / Stop-Loss", "#ef4444", "bear"
+        else:
+            sentiment, action, color, tier = "Neutral",  "Maintain Position",       "#f59e0b", "neutral"
+        return {
+            "ticker":      ticker,
+            "sentiment":   sentiment,
+            "action":      action,
+            "color":       color,
+            "tier":        tier,
+            "sent_score":  sent_score,
+            "mom_pct":     mom["pct"],
+            "final_score": final,
+        }
+
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(analyze_ticker, t): t for t in holdings.keys()}
+        for future in as_completed(futures):
+            try:
+                row = future.result()
+                results.append(row)
+                socketio.emit("ticker_result", row)  # push each card as it finishes
+            except Exception as e:
+                print(f"  Error: {e}")
+
+    _cache = {"data": results, "ts": time.time()}
+    socketio.emit("analysis_complete")
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    socketio.run(app, host="0.0.0.0", port=port, debug=False)
