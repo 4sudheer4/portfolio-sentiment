@@ -308,7 +308,7 @@ def report():
 {% endfor %}
 </div>
 <footer>
-  Scores are informational only — not financial advice.<br/>
+  Scores are informational only — not financial advice. V2<br/>
   <a href="/">Refresh</a> to pull latest data.
 </footer>
 </body>
