@@ -15,7 +15,5 @@ CMD ["gunicorn", \
      "--bind", "0.0.0.0:5000", \
      "--timeout", "120", \
      "--workers", "1", \
-     "--worker-class", "gthread", \
-     "--threads", "4", \
-     "--keep-alive", "5", \
+     "--worker-class", "eventlet", \
      "app:app"]

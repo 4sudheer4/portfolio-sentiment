@@ -1,3 +1,12 @@
+import platform
+
+if platform.system() == "Linux":
+    import eventlet
+    eventlet.monkey_patch()
+    ASYNC_MODE = "eventlet"
+else:
+    ASYNC_MODE = "threading"
+
 import robin_stocks.robinhood as rh
 import yfinance as yf
 import os
@@ -6,8 +15,6 @@ import requests
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 # Prevent yfinance SQLite lock conflicts with threading
 try:
     from yfinance import set_tz_cache_location
@@ -18,7 +25,7 @@ except Exception:
 load_dotenv()
 
 app    = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode=ASYNC_MODE)
 
 HF_API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
 HF_TOKEN   = os.getenv("HF_TOKEN")
@@ -259,10 +266,14 @@ HTML = """
   const status = document.getElementById('status-text');
   const cards  = document.getElementById('cards');
 
+  let analysisStarted = false;
   socket.on('connect', () => {
     dot.classList.add('live');
-    status.textContent = 'Analyzing portfolio...';
-    socket.emit('start_analysis');
+    if (!analysisStarted) {
+      analysisStarted = true;
+      status.textContent = 'Analyzing portfolio...';
+      socket.emit('start_analysis');
+    }
   });
 
   socket.on('ticker_result', (data) => {
@@ -365,23 +376,29 @@ def handle_analysis():
             "final_score": final,
         }
 
-    # Step 1 — analyze all tickers in parallel (fast)
+    # Step 1 — analyze tickers and stream results
+    # Linux/EC2: GreenPool for concurrent I/O via eventlet green threads
+    # Mac: sequential (eventlet kqueue bug on macOS)
     results = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(analyze_ticker, t): t for t in holdings.keys()}
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                print(f"  Error: {e}")
 
-    # Step 2 — sort by score
-    results.sort(key=lambda x: x["final_score"], reverse=True)
+    def analyze_and_collect(ticker):
+        try:
+            return analyze_ticker(ticker)
+        except Exception as e:
+            print(f"  Error {ticker}: {e}")
+            return None
 
-    # Step 3 — stream to browser one by one (good UX)
-    for row in results:
-        socketio.emit("ticker_result", row)
-        socketio.sleep(0.3)  # 300ms delay between each card
+    if ASYNC_MODE == "eventlet":
+        pool = eventlet.GreenPool(size=5)
+        rows = pool.imap(analyze_and_collect, holdings.keys())
+    else:
+        rows = (analyze_and_collect(t) for t in holdings.keys())
+
+    for row in rows:
+        if row:
+            results.append(row)
+            socketio.emit("ticker_result", row)
+            socketio.sleep(0.3)
 
     _cache = {"data": results, "ts": time.time()}
     socketio.emit("analysis_complete")
