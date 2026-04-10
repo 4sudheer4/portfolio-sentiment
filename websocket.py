@@ -365,28 +365,21 @@ def handle_analysis():
             "final_score": final,
         }
 
-    # Step 1 — analyze all tickers in parallel (fast)
     results = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(analyze_ticker, t): t for t in holdings.keys()}
         for future in as_completed(futures):
             try:
-                results.append(future.result())
+                row = future.result()
+                results.append(row)
+                socketio.emit("ticker_result", row)  # push each card as it finishes
             except Exception as e:
                 print(f"  Error: {e}")
-
-    # Step 2 — sort by score
-    results.sort(key=lambda x: x["final_score"], reverse=True)
-
-    # Step 3 — stream to browser one by one (good UX)
-    for row in results:
-        socketio.emit("ticker_result", row)
-        socketio.sleep(0.3)  # 300ms delay between each card
 
     _cache = {"data": results, "ts": time.time()}
     socketio.emit("analysis_complete")
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port, debug=False)

@@ -1,8 +1,7 @@
 flask
 gunicorn
-python-dotenv
-robin_stocks
+robin-stocks
 yfinance
+python-dotenv
 pandas
-numpy<2
 requests
