@@ -11,10 +11,12 @@ import robin_stocks.robinhood as rh
 import yfinance as yf
 import os
 import time
+import hashlib
+import secrets
 import requests
-from flask import Flask, render_template_string
+import jwt
+from flask import Flask, render_template_string, make_response, request
 from flask_socketio import SocketIO
-from flask import request
 from dotenv import load_dotenv
 # Prevent yfinance SQLite lock conflicts with threading
 try:
@@ -25,19 +27,41 @@ except Exception:
 
 load_dotenv()
 
-app    = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode=ASYNC_MODE)
+app          = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
+socketio     = SocketIO(app, cors_allowed_origins="*", async_mode=ASYNC_MODE)
 
 HF_API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
 HF_TOKEN   = os.getenv("HF_TOKEN")
+JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 
 LABEL_TO_SCORE = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 
-# ── Cache ────────────────────────────────────────────────────────────────────
-_cache       = {"data": None, "ts": 0}
+# ── Cache — keyed by md5(jwt_token)[:8] ─────────────────────────────────────
+_caches      = {}   # cache_key → {"data": [...], "ts": float}
 _logged_in   = False
 _login_lock  = False
 CACHE_TTL    = 1800
+JWT_EXPIRY   = 86400  # 24 hours
+
+# ── JWT helpers ──────────────────────────────────────────────────────────────
+def _issue_jwt():
+    payload = {
+        "uid": secrets.token_hex(8),
+        "iat": int(time.time()),
+        "exp": int(time.time()) + JWT_EXPIRY,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def _verify_jwt(token):
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return True
+    except Exception:
+        return False
+
+def _cache_key(token):
+    return hashlib.md5(token.encode()).hexdigest()[:8]
 
 # ── Robinhood login ──────────────────────────────────────────────────────────
 def login_to_robinhood():
@@ -340,18 +364,35 @@ HTML = """
 # ── Flask route ──────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    token = request.cookies.get("auth_token")
+    resp  = make_response(render_template_string(HTML))
+    if not token or not _verify_jwt(token):
+        token = _issue_jwt()
+        resp.set_cookie(
+            "auth_token", token,
+            httponly=True, samesite="Lax",
+            max_age=JWT_EXPIRY
+        )
+    return resp
 
 # ── WebSocket event ──────────────────────────────────────────────────────────
 @socketio.on("start_analysis")
 def handle_analysis():
-    global _cache
-    sid = request.sid  # capture this client's session ID
+    global _caches
+    sid   = request.sid
+    token = request.cookies.get("auth_token")
+
+    if not token or not _verify_jwt(token):
+        socketio.emit("error", {"message": "Session expired. Please refresh the page."}, to=sid)
+        return
+
+    ckey       = _cache_key(token)
+    user_cache = _caches.get(ckey, {"data": None, "ts": 0})
 
     # Serve from cache if fresh
-    if _cache["data"] and (time.time() - _cache["ts"]) < CACHE_TTL:
-        print("Serving from cache")
-        for row in _cache["data"]:
+    if user_cache["data"] and (time.time() - user_cache["ts"]) < CACHE_TTL:
+        print(f"Serving from cache [{ckey}]")
+        for row in user_cache["data"]:
             socketio.emit("ticker_result", row, to=sid)
         socketio.emit("analysis_complete", to=sid)
         return
@@ -412,7 +453,7 @@ def handle_analysis():
             socketio.emit("ticker_result", row, to=sid)
             socketio.sleep(0.3)
 
-    _cache = {"data": results, "ts": time.time()}
+    _caches[ckey] = {"data": results, "ts": time.time()}
     socketio.emit("analysis_complete", to=sid)
 
 

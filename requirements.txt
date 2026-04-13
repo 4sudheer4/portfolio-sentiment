@@ -7,3 +7,4 @@ yfinance
 python-dotenv
 pandas
 requests
+pyjwt
