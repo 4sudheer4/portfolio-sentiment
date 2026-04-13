@@ -14,6 +14,7 @@ import time
 import requests
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO
+from flask import request
 from dotenv import load_dotenv
 # Prevent yfinance SQLite lock conflicts with threading
 try:
@@ -33,22 +34,32 @@ HF_TOKEN   = os.getenv("HF_TOKEN")
 LABEL_TO_SCORE = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 
 # ── Cache ────────────────────────────────────────────────────────────────────
-_cache     = {"data": None, "ts": 0}
-_logged_in = False
-CACHE_TTL  = 1800
+_cache       = {"data": None, "ts": 0}
+_logged_in   = False
+_login_lock  = False
+CACHE_TTL    = 1800
 
 # ── Robinhood login ──────────────────────────────────────────────────────────
 def login_to_robinhood():
-    global _logged_in
+    global _logged_in, _login_lock
     if _logged_in:
         return
-    username = os.getenv("RH_USERNAME")
-    password = os.getenv("RH_PASSWORD")
-    if not username or not password:
-        raise ValueError("Missing credentials.")
-    rh.login(username, password, store_session=True)
-    _logged_in = True
-    print("Logged into Robinhood.")
+    if _login_lock:
+        # another green thread is mid-login, wait for it
+        while _login_lock:
+            socketio.sleep(0.1)
+        return
+    _login_lock = True
+    try:
+        username = os.getenv("RH_USERNAME")
+        password = os.getenv("RH_PASSWORD")
+        if not username or not password:
+            raise ValueError("Missing credentials.")
+        rh.login(username, password, store_session=True)
+        _logged_in = True
+        print("Logged into Robinhood.")
+    finally:
+        _login_lock = False
 
 # ── FinBERT via HuggingFace API ──────────────────────────────────────────────
 def query_finbert(text: str) -> dict:
@@ -335,24 +346,25 @@ def index():
 @socketio.on("start_analysis")
 def handle_analysis():
     global _cache
+    sid = request.sid  # capture this client's session ID
 
     # Serve from cache if fresh
     if _cache["data"] and (time.time() - _cache["ts"]) < CACHE_TTL:
         print("Serving from cache")
         for row in _cache["data"]:
-            socketio.emit("ticker_result", row)
-        socketio.emit("analysis_complete")
+            socketio.emit("ticker_result", row, to=sid)
+        socketio.emit("analysis_complete", to=sid)
         return
 
     try:
         login_to_robinhood()
     except Exception as e:
-        socketio.emit("error", {"message": str(e)})
+        socketio.emit("error", {"message": str(e)}, to=sid)
         return
 
     holdings = rh.account.build_holdings()
     if not holdings:
-        socketio.emit("error", {"message": "No holdings found."})
+        socketio.emit("error", {"message": "No holdings found."}, to=sid)
         return
 
     def analyze_ticker(ticker):
@@ -397,11 +409,11 @@ def handle_analysis():
     for row in rows:
         if row:
             results.append(row)
-            socketio.emit("ticker_result", row)
+            socketio.emit("ticker_result", row, to=sid)
             socketio.sleep(0.3)
 
     _cache = {"data": results, "ts": time.time()}
-    socketio.emit("analysis_complete")
+    socketio.emit("analysis_complete", to=sid)
 
 
 if __name__ == "__main__":
