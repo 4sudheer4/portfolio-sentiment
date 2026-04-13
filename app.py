@@ -40,9 +40,16 @@ LABEL_TO_SCORE = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 # ── Cache — keyed by md5(jwt_token)[:8] ─────────────────────────────────────
 _caches      = {}   # cache_key → {"data": [...], "ts": float}
 _logged_in   = False
-_login_lock  = False
 CACHE_TTL    = 1800
 JWT_EXPIRY   = 86400  # 24 hours
+
+# ── Login semaphore — one login at a time, eventlet-safe ─────────────────────
+if ASYNC_MODE == "eventlet":
+    import eventlet.semaphore
+    _login_sem = eventlet.semaphore.Semaphore(1)
+else:
+    import threading
+    _login_sem = threading.Semaphore(1)
 
 # ── JWT helpers ──────────────────────────────────────────────────────────────
 def _issue_jwt():
@@ -65,16 +72,12 @@ def _cache_key(token):
 
 # ── Robinhood login ──────────────────────────────────────────────────────────
 def login_to_robinhood():
-    global _logged_in, _login_lock
+    global _logged_in
     if _logged_in:
         return
-    if _login_lock:
-        # another green thread is mid-login, wait for it
-        while _login_lock:
-            socketio.sleep(0.1)
-        return
-    _login_lock = True
-    try:
+    with _login_sem:
+        if _logged_in:  # re-check after acquiring — another thread may have logged in
+            return
         username = os.getenv("RH_USERNAME")
         password = os.getenv("RH_PASSWORD")
         if not username or not password:
@@ -82,8 +85,6 @@ def login_to_robinhood():
         rh.login(username, password, store_session=True)
         _logged_in = True
         print("Logged into Robinhood.")
-    finally:
-        _login_lock = False
 
 # ── FinBERT via HuggingFace API ──────────────────────────────────────────────
 def query_finbert(text: str) -> dict:
