@@ -11,9 +11,7 @@ COPY app.py .
 
 EXPOSE 5000
 
-CMD ["gunicorn", \
-     "--bind", "0.0.0.0:5000", \
-     "--timeout", "120", \
-     "--workers", "1", \
-     "--worker-class", "eventlet", \
-     "app:app"]
+CMD ["uvicorn", "app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "5000", \
+     "--timeout-keep-alive", "120"]

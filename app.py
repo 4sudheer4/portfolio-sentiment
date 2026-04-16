@@ -1,23 +1,19 @@
-import platform
+import asyncio
+import hashlib
+import os
+import secrets
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-if platform.system() == "Linux":
-    import eventlet
-    eventlet.monkey_patch()
-    ASYNC_MODE = "eventlet"
-else:
-    ASYNC_MODE = "threading"
-
+import jwt
+import requests
 import robin_stocks.robinhood as rh
 import yfinance as yf
-import os
-import time
-import hashlib
-import secrets
-import requests
-import jwt
-from flask import Flask, render_template_string, make_response, request
-from flask_socketio import SocketIO
 from dotenv import load_dotenv
+from fastapi import Cookie, FastAPI, WebSocket
+from fastapi.responses import HTMLResponse
+
 # Prevent yfinance SQLite lock conflicts with threading
 try:
     from yfinance import set_tz_cache_location
@@ -27,29 +23,27 @@ except Exception:
 
 load_dotenv()
 
-app          = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
-socketio     = SocketIO(app, cors_allowed_origins="*", async_mode=ASYNC_MODE)
+app = FastAPI()
 
-HF_API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert"
 HF_TOKEN   = os.getenv("HF_TOKEN")
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 
-LABEL_TO_SCORE = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
+LABEL_TO_SCORE   = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
+SENTIMENT_WEIGHT = 0.55
+MOMENTUM_WEIGHT  = 0.45
 
 # ── Cache — keyed by md5(jwt_token)[:8] ─────────────────────────────────────
-_caches      = {}   # cache_key → {"data": [...], "ts": float}
-_logged_in   = False
-CACHE_TTL    = 1800
-JWT_EXPIRY   = 86400  # 24 hours
+_caches    = {}   # cache_key → {"data": [...], "ts": float}
+_logged_in = False
+CACHE_TTL  = 1800
+JWT_EXPIRY = 86400  # 24 hours
 
-# ── Login semaphore — one login at a time, eventlet-safe ─────────────────────
-if ASYNC_MODE == "eventlet":
-    import eventlet.semaphore
-    _login_sem = eventlet.semaphore.Semaphore(1)
-else:
-    import threading
-    _login_sem = threading.Semaphore(1)
+# ── Thread pool for blocking I/O ─────────────────────────────────────────────
+_executor = ThreadPoolExecutor(max_workers=5)
+
+# ── Login lock — initialized lazily inside event loop ────────────────────────
+_login_lock = None
 
 # ── JWT helpers ──────────────────────────────────────────────────────────────
 def _issue_jwt():
@@ -71,40 +65,64 @@ def _cache_key(token):
     return hashlib.md5(token.encode()).hexdigest()[:8]
 
 # ── Robinhood login ──────────────────────────────────────────────────────────
-def login_to_robinhood():
-    global _logged_in
+def _do_rh_login():
+    username = os.getenv("RH_USERNAME")
+    password = os.getenv("RH_PASSWORD")
+    if not username or not password:
+        raise ValueError("Missing credentials.")
+    rh.login(username, password, store_session=True)
+
+async def login_to_robinhood():
+    global _logged_in, _login_lock
     if _logged_in:
         return
-    with _login_sem:
-        if _logged_in:  # re-check after acquiring — another thread may have logged in
+    if _login_lock is None:
+        _login_lock = asyncio.Lock()
+    async with _login_lock:
+        if _logged_in:  # re-check after acquiring
             return
-        username = os.getenv("RH_USERNAME")
-        password = os.getenv("RH_PASSWORD")
-        if not username or not password:
-            raise ValueError("Missing credentials.")
-        rh.login(username, password, store_session=True)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_rh_login)
         _logged_in = True
         print("Logged into Robinhood.")
 
 # ── FinBERT via HuggingFace API ──────────────────────────────────────────────
 def query_finbert(text: str) -> dict:
-    try:
-        response = requests.post(
-            HF_API_URL,
-            headers={"Authorization": f"Bearer {HF_TOKEN}"},
-            json={"inputs": text},
-            timeout=10
-        )
-        result = response.json()
-        if isinstance(result, list) and len(result) > 0:
-            if isinstance(result[0], list):
-                result = result[0]
-            best = max(result, key=lambda x: x["score"])
-            return {"label": best["label"].lower(), "score": best["score"]}
-        return {"label": "neutral", "score": 1.0}
-    except Exception as e:
-        print(f"  HF API error: {e}")
-        return {"label": "neutral", "score": 1.0}
+    print(f"  [HF] querying: {text[:60]}")
+    for attempt in range(3):
+        try:
+            print(f"  [HF] attempt {attempt + 1} — sending request")
+            response = requests.post(
+                HF_API_URL,
+                headers={"Authorization": f"Bearer {HF_TOKEN}"},
+                json={"inputs": text},
+                timeout=20
+            )
+            print(f"  [HF] status={response.status_code} body={response.text[:200]}")
+
+            # Model loading — HF returns 503 or {"error": "loading"}
+            if response.status_code == 503 or (
+                isinstance(response.json(), dict) and "error" in response.json()
+            ):
+                wait = response.json().get("estimated_time", 5) if response.content else 5
+                print(f"  [HF] model loading, waiting {wait}s")
+                time.sleep(min(wait, 10))
+                continue
+
+            result = response.json()
+            print(f"  [HF] parsed result: {result}")
+            if isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], list):
+                    result = result[0]
+                best = max(result, key=lambda x: x["score"])
+                print(f"  [HF] best label={best['label']} score={best['score']:.4f}")
+                return {"label": best["label"].lower(), "score": best["score"]}
+            print(f"  [HF] unexpected result shape, returning neutral")
+        except Exception as e:
+            print(f"  [HF] exception (attempt {attempt + 1}): {type(e).__name__}: {e}")
+            time.sleep(2)
+    print(f"  [HF] all attempts failed, returning neutral")
+    return {"label": "neutral", "score": 1.0}
 
 # ── FinBERT sentiment ────────────────────────────────────────────────────────
 def get_finbert_sentiment(ticker: str) -> float:
@@ -181,7 +199,6 @@ HTML = """
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Portfolio Signal</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
   <style>
     :root {
@@ -297,121 +314,145 @@ HTML = """
 </footer>
 
 <script>
-  const socket = io();
   const dot    = document.getElementById('status-dot');
   const status = document.getElementById('status-text');
   const cards  = document.getElementById('cards');
 
-  let analysisStarted = false;
-  socket.on('connect', () => {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+  ws.onopen = () => {
     dot.classList.add('live');
-    if (!analysisStarted) {
-      analysisStarted = true;
-      status.textContent = 'Analyzing portfolio...';
-      socket.emit('start_analysis');
+    status.textContent = 'Analyzing portfolio...';
+    ws.send('start_analysis');
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === 'ticker_result') {
+      const data = msg.data;
+      status.textContent = `Analyzed ${data.ticker}...`;
+      const bar  = Math.round(((data.final_score + 1) / 2) * 100);
+      const card = document.createElement('div');
+      card.className = `card ${data.tier}`;
+      card.innerHTML = `
+        <div class="card-row">
+          <span class="ticker">${data.ticker}</span>
+          <span class="final-score" style="color:${data.color}">${data.final_score}</span>
+        </div>
+        <div class="sub-row">
+          <span>NLP <strong>${data.sent_score}</strong></span>
+          <span>5d momentum <strong style="color:${data.mom_pct >= 0 ? 'var(--bull)' : 'var(--bear)'}">${data.mom_pct >= 0 ? '+' : ''}${data.mom_pct}%</strong></span>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${bar}%; background:${data.color}44; border:1px solid ${data.color};"></div>
+        </div>
+        <span class="badge" style="background:${data.color}18; color:${data.color};">
+          <span class="badge-dot" style="background:${data.color}"></span>
+          ${data.sentiment}
+        </span>
+        <div class="action">${data.action}</div>
+      `;
+      cards.appendChild(card);
+      requestAnimationFrame(() => card.classList.add('visible'));
     }
-  });
 
-  socket.on('ticker_result', (data) => {
-    status.textContent = `Analyzed ${data.ticker}...`;
-    const bar = Math.round(((data.final_score + 1) / 2) * 100);
-    const card = document.createElement('div');
-    card.className = `card ${data.tier}`;
-    card.innerHTML = `
-      <div class="card-row">
-        <span class="ticker">${data.ticker}</span>
-        <span class="final-score" style="color:${data.color}">${data.final_score}</span>
-      </div>
-      <div class="sub-row">
-        <span>NLP <strong>${data.sent_score}</strong></span>
-        <span>5d momentum <strong style="color:${data.mom_pct >= 0 ? 'var(--bull)' : 'var(--bear)'}">${data.mom_pct >= 0 ? '+' : ''}${data.mom_pct}%</strong></span>
-      </div>
-      <div class="bar-track">
-        <div class="bar-fill" style="width:${bar}%; background:${data.color}44; border:1px solid ${data.color};"></div>
-      </div>
-      <span class="badge" style="background:${data.color}18; color:${data.color};">
-        <span class="badge-dot" style="background:${data.color}"></span>
-        ${data.sentiment}
-      </span>
-      <div class="action">${data.action}</div>
-    `;
-    cards.appendChild(card);
-    // Trigger animation
-    requestAnimationFrame(() => card.classList.add('visible'));
-  });
+    if (msg.type === 'analysis_complete') {
+      dot.classList.remove('live');
+      status.textContent = 'Analysis complete';
+      const allCards = [...cards.querySelectorAll('.card')];
+      allCards.sort((a, b) => {
+        const scoreA = parseFloat(a.querySelector('.final-score').textContent);
+        const scoreB = parseFloat(b.querySelector('.final-score').textContent);
+        return scoreB - scoreA;
+      });
+      allCards.forEach(c => cards.appendChild(c));
+    }
 
-  socket.on('analysis_complete', () => {
-    dot.classList.remove('live');
-    status.textContent = 'Analysis complete';
-    // Sort cards by final score
-    const allCards = [...cards.querySelectorAll('.card')];
-    allCards.sort((a, b) => {
-      const scoreA = parseFloat(a.querySelector('.final-score').textContent);
-      const scoreB = parseFloat(b.querySelector('.final-score').textContent);
-      return scoreB - scoreA;
-    });
-    allCards.forEach(c => cards.appendChild(c));
-  });
+    if (msg.type === 'error') {
+      dot.style.background = 'var(--bear)';
+      status.textContent = `Error: ${msg.message}`;
+    }
+  };
 
-  socket.on('error', (data) => {
+  ws.onerror = () => {
     dot.style.background = 'var(--bear)';
-    status.textContent = `Error: ${data.message}`;
-  });
+    status.textContent = 'Connection error';
+  };
+
+  ws.onclose = () => {
+    dot.classList.remove('live');
+    if (status.textContent !== 'Analysis complete') {
+      status.textContent = 'Disconnected — refresh to reconnect';
+    }
+  };
 </script>
 </body>
 </html>
 """
 
-# ── Flask route ──────────────────────────────────────────────────────────────
-@app.route("/")
-def index():
-    token = request.cookies.get("auth_token")
-    resp  = make_response(render_template_string(HTML))
-    if not token or not _verify_jwt(token):
+# ── HTTP route ────────────────────────────────────────────────────────────────
+@app.get("/")
+async def index(auth_token: str = Cookie(None)):
+    response = HTMLResponse(content=HTML)
+    if not auth_token or not _verify_jwt(auth_token):
         token = _issue_jwt()
-        resp.set_cookie(
+        response.set_cookie(
             "auth_token", token,
-            httponly=True, samesite="Lax",
+            httponly=True, samesite="lax",
             max_age=JWT_EXPIRY
         )
-    return resp
+    return response
 
-# ── WebSocket event ──────────────────────────────────────────────────────────
-@socketio.on("start_analysis")
-def handle_analysis():
-    global _caches
-    sid   = request.sid
-    token = request.cookies.get("auth_token")
-
+# ── WebSocket endpoint ────────────────────────────────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    t_start = time.time()
+    token = ws.cookies.get("auth_token")
     if not token or not _verify_jwt(token):
-        socketio.emit("error", {"message": "Session expired. Please refresh the page."}, to=sid)
+        await ws.send_json({"type": "error", "message": "Session expired. Please refresh."})
+        await ws.close()
+        return
+
+    try:
+        msg = await ws.receive_text()
+        if msg != "start_analysis":
+            return
+    except Exception:
         return
 
     ckey       = _cache_key(token)
     user_cache = _caches.get(ckey, {"data": None, "ts": 0})
 
-    # Serve from cache if fresh
     if user_cache["data"] and (time.time() - user_cache["ts"]) < CACHE_TTL:
         print(f"Serving from cache [{ckey}]")
         for row in user_cache["data"]:
-            socketio.emit("ticker_result", row, to=sid)
-        socketio.emit("analysis_complete", to=sid)
+            await ws.send_json({"type": "ticker_result", "data": row})
+        await ws.send_json({"type": "analysis_complete"})
         return
 
     try:
-        login_to_robinhood()
+        await login_to_robinhood()
     except Exception as e:
-        socketio.emit("error", {"message": str(e)}, to=sid)
+        await ws.send_json({"type": "error", "message": str(e)})
         return
 
-    holdings = rh.account.build_holdings()
+    loop     = asyncio.get_event_loop()
+    holdings = await loop.run_in_executor(None, rh.account.build_holdings)
     if not holdings:
-        socketio.emit("error", {"message": "No holdings found."}, to=sid)
+        await ws.send_json({"type": "error", "message": "No holdings found."})
         return
 
     def analyze_ticker(ticker):
+        t0 = time.time()
         sent_score = get_finbert_sentiment(ticker)
+        t1 = time.time()
         mom        = get_price_momentum(ticker)
+        t2 = time.time()
+        print(f"{ticker}: sentiment={t1-t0:.2f}s momentum={t2-t1:.2f}s total={t2-t0:.2f}s")
+
         final      = combined_signal(sent_score, mom["score"])
         if final >= 0.15:
             sentiment, action, color, tier = "Bullish",  "HODL / Accumulate",       "#22c55e", "bull"
@@ -430,34 +471,45 @@ def handle_analysis():
             "final_score": final,
         }
 
-    # Step 1 — analyze tickers and stream results
-    # Linux/EC2: GreenPool for concurrent I/O via eventlet green threads
-    # Mac: sequential (eventlet kqueue bug on macOS)
     results = []
-
-    def analyze_and_collect(ticker):
+    tasks   = [
+        loop.run_in_executor(_executor, analyze_ticker, ticker)
+        for ticker in holdings.keys()
+    ]
+    for coro in asyncio.as_completed(tasks):
         try:
-            return analyze_ticker(ticker)
-        except Exception as e:
-            print(f"  Error {ticker}: {e}")
-            return None
-
-    if ASYNC_MODE == "eventlet":
-        pool = eventlet.GreenPool(size=5)
-        rows = pool.imap(analyze_and_collect, holdings.keys())
-    else:
-        rows = (analyze_and_collect(t) for t in holdings.keys())
-
-    for row in rows:
-        if row:
+            row = await coro
             results.append(row)
-            socketio.emit("ticker_result", row, to=sid)
-            socketio.sleep(0.3)
+            await ws.send_json({"type": "ticker_result", "data": row})
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            print(f"  Error: {e}")
 
     _caches[ckey] = {"data": results, "ts": time.time()}
-    socketio.emit("analysis_complete", to=sid)
+    await ws.send_json({"type": "analysis_complete"})
+    print(f"Total analysis time: {time.time() - t_start:.2f}s")
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    socketio.run(app, host="0.0.0.0", port=port, debug=False)
+    import uvicorn
+    port = int(os.environ.get("PORT", 8082))
+
+    if sys.platform == "darwin":
+        # macOS Python 3.9: kqueue selector is buggy.
+        # Bypass uvicorn's loop creation — run server.serve() in our own
+        # SelectSelector-based loop so kqueue is never touched.
+        import selectors
+
+        async def _serve():
+            config = uvicorn.Config(app, host="0.0.0.0", port=port)
+            server = uvicorn.Server(config)
+            await server.serve()
+
+        _loop = asyncio.SelectorEventLoop(selectors.SelectSelector())
+        asyncio.set_event_loop(_loop)
+        try:
+            _loop.run_until_complete(_serve())
+        finally:
+            _loop.close()
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=port)

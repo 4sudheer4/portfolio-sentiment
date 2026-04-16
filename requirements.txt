@@ -1,7 +1,6 @@
-flask
-flask-socketio
-eventlet
-gunicorn
+fastapi
+uvicorn[standard]
+websockets
 robin-stocks
 yfinance
 python-dotenv
