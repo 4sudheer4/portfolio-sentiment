@@ -26,7 +26,7 @@ jobs:
             docker rm sentiment-app || true
             docker build -t sentiment-app .
             docker run -d \
-              -p 8080:5000 \
+              -p 8082:5000 \
               --env-file .env \
               --name sentiment-app \
               --restart always \
