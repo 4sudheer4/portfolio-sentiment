@@ -4,7 +4,7 @@ import os
 import secrets
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import jwt
 import requests
@@ -33,26 +33,23 @@ LABEL_TO_SCORE   = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 SENTIMENT_WEIGHT = 0.55
 MOMENTUM_WEIGHT  = 0.45
 
-# ── Cache — keyed by md5(jwt_token)[:8] ─────────────────────────────────────
-_caches    = {}   # cache_key → {"data": [...], "ts": float}
+# ── Cache — keyed by md5(jwt_token)[:8] ──────────────────────────────────────
+_caches    = {}
 _logged_in = False
-CACHE_TTL  = 1800
-JWT_EXPIRY = 86400  # 24 hours
-
-# ── Thread pool for blocking I/O ─────────────────────────────────────────────
-_executor = ThreadPoolExecutor(max_workers=5)
-
-# ── Login lock — initialized lazily inside event loop ────────────────────────
 _login_lock = None
+CACHE_TTL  = 1800
+JWT_EXPIRY = 86400
 
-# ── JWT helpers ──────────────────────────────────────────────────────────────
+# ── Thread pool ───────────────────────────────────────────────────────────────
+_executor = ThreadPoolExecutor(max_workers=20)
+
+# ── JWT helpers ───────────────────────────────────────────────────────────────
 def _issue_jwt():
-    payload = {
+    return jwt.encode({
         "uid": secrets.token_hex(8),
         "iat": int(time.time()),
         "exp": int(time.time()) + JWT_EXPIRY,
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    }, JWT_SECRET, algorithm="HS256")
 
 def _verify_jwt(token):
     try:
@@ -64,7 +61,7 @@ def _verify_jwt(token):
 def _cache_key(token):
     return hashlib.md5(token.encode()).hexdigest()[:8]
 
-# ── Robinhood login ──────────────────────────────────────────────────────────
+# ── Robinhood login ───────────────────────────────────────────────────────────
 def _do_rh_login():
     username = os.getenv("RH_USERNAME")
     password = os.getenv("RH_PASSWORD")
@@ -79,94 +76,135 @@ async def login_to_robinhood():
     if _login_lock is None:
         _login_lock = asyncio.Lock()
     async with _login_lock:
-        if _logged_in:  # re-check after acquiring
+        if _logged_in:
             return
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _do_rh_login)
         _logged_in = True
         print("Logged into Robinhood.")
 
-# ── FinBERT via HuggingFace API ──────────────────────────────────────────────
-def query_finbert(text: str) -> dict:
-    print(f"  [HF] querying: {text[:60]}")
+# ── Step 1: Collect full news items per ticker ────────────────────────────────
+def collect_news(tickers: list) -> dict:
+    """
+    Fetch full news items for all tickers.
+    Returns {ticker: [full_item1, full_item2]}
+    Stores full items (not just titles) to preserve timestamps
+    for recency weighting later.
+    """
+    def fetch_one(ticker):
+        try:
+            news = yf.Ticker(ticker).news or []
+            return ticker, news[:2]
+        except Exception as e:
+            print(f"News error {ticker}: {e}")
+            return ticker, []
+    result = {}
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futures = {ex.submit(fetch_one, t):t for t in tickers}
+        for future in as_completed(futures):
+            ticker, news = future.result()
+            result[ticker] = news
+    return result
+
+
+# ── Step 2: Batch score all headlines in ONE API call ─────────────────────────
+def batch_score_finbert(headlines: list) -> dict:
+    """
+    Send ALL headlines to HuggingFace in one POST request.
+    Returns {headline_text: compound_score}
+
+    Before: 56 individual API calls → 40-80s
+    After:  1 batch API call        → 3-5s
+    """
+    if not headlines:
+        return {}
+
     for attempt in range(3):
         try:
-            print(f"  [HF] attempt {attempt + 1} — sending request")
             response = requests.post(
                 HF_API_URL,
                 headers={"Authorization": f"Bearer {HF_TOKEN}"},
-                json={"inputs": text},
-                timeout=20
+                json={"inputs": headlines},
+                timeout=30
             )
-            print(f"  [HF] status={response.status_code} body={response.text[:200]}")
 
-            # Model loading — HF returns 503 or {"error": "loading"}
-            if response.status_code == 503 or (
-                isinstance(response.json(), dict) and "error" in response.json()
-            ):
-                wait = response.json().get("estimated_time", 5) if response.content else 5
-                print(f"  [HF] model loading, waiting {wait}s")
-                time.sleep(min(wait, 10))
+            if not response.text.strip():
+                print(f"  HF empty response (attempt {attempt+1})")
+                time.sleep(2)
                 continue
 
-            result = response.json()
-            print(f"  [HF] parsed result: {result}")
-            if isinstance(result, list) and len(result) > 0:
-                if isinstance(result[0], list):
-                    result = result[0]
-                best = max(result, key=lambda x: x["score"])
-                print(f"  [HF] best label={best['label']} score={best['score']:.4f}")
-                return {"label": best["label"].lower(), "score": best["score"]}
-            print(f"  [HF] unexpected result shape, returning neutral")
+            results = response.json()
+
+            # Model still loading — HF returns {"error": ..., "estimated_time": N}
+            if isinstance(results, dict) and "error" in results:
+                wait = min(results.get("estimated_time", 10), 20)
+                print(f"  HF model loading, waiting {wait}s...")
+                time.sleep(wait)
+                continue
+
+            # Parse batch results
+            # results = [[{label, score}, ...], [...], [...]]
+            # One inner list per headline, in same order as input
+            scores = {}
+            for headline, label_list in zip(headlines, results):
+                if isinstance(label_list, list):
+                    best   = max(label_list, key=lambda x: x["score"])
+                    label  = best["label"].lower()
+                    conf   = best["score"]
+                    scores[headline] = LABEL_TO_SCORE.get(label, 0.0) * conf
+                else:
+                    scores[headline] = 0.0
+            return scores
+
         except Exception as e:
-            print(f"  [HF] exception (attempt {attempt + 1}): {type(e).__name__}: {e}")
-            time.sleep(2)
-    print(f"  [HF] all attempts failed, returning neutral")
-    return {"label": "neutral", "score": 1.0}
+            print(f"  HF batch error (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(2)
 
-# ── FinBERT sentiment ────────────────────────────────────────────────────────
-def get_finbert_sentiment(ticker: str) -> float:
-    try:
-        stock      = yf.Ticker(ticker)
-        news_items = stock.news or []
-        if not news_items:
-            return 0.0
+    # All retries failed — return neutral for everything
+    return {h: 0.0 for h in headlines}
 
-        now          = time.time()
-        weighted_sum = 0.0
-        weight_total = 0.0
+# ── Step 3: Compute weighted sentiment score per ticker ───────────────────────
+def compute_ticker_score(news_items: list, headline_scores: dict) -> float:
+    """
+    Apply exponential recency decay to pre-scored headlines.
 
-        for item in news_items[:5]:
-            title = (
-                item.get("title")
-                or item.get("content", {}).get("title")
-                or ""
-            )
-            if not title:
-                continue
+    Half-life = 3 days (259200 seconds)
+    age=0d → weight=1.0 (full)
+    age=3d → weight=0.5 (half)
+    age=6d → weight=0.25 (quarter)
 
-            pub_time       = item.get("providerPublishTime") or now
-            age_seconds    = max(now - pub_time, 0)
-            recency_weight = 0.5 ** (age_seconds / 259200)
+    Returns weighted average in [-1, 1]
+    """
+    now          = time.time()
+    weighted_sum = 0.0
+    weight_total = 0.0
 
-            result     = query_finbert(title)
-            label      = result["label"]
-            confidence = result["score"]
+    for item in news_items:
+        title = (
+            item.get("title")
+            or item.get("content", {}).get("title")
+            or ""
+        )
+        if not title or title not in headline_scores:
+            continue
 
-            score           = LABEL_TO_SCORE.get(label, 0.0) * confidence
-            combined_weight = recency_weight * confidence
+        pub_time       = item.get("providerPublishTime") or now
+        age_seconds    = max(now - pub_time, 0)
+        recency_weight = 0.5 ** (age_seconds / 259200)
+        score          = headline_scores[title]
 
-            weighted_sum  += score * combined_weight
-            weight_total  += combined_weight
+        weighted_sum  += score * recency_weight
+        weight_total  += recency_weight
 
-        return round(weighted_sum / weight_total, 4) if weight_total else 0.0
+    return round(weighted_sum / weight_total, 4) if weight_total else 0.0
 
-    except Exception as e:
-        print(f"  FinBERT error for {ticker}: {e}")
-        return 0.0
-
-# ── Price momentum ───────────────────────────────────────────────────────────
+# ── Step 4: Price momentum ────────────────────────────────────────────────────
 def get_price_momentum(ticker: str) -> dict:
+    """
+    5-day price % change normalized to [-1, 1].
+    Caps at ±20% so outliers don't dominate the blend.
+    """
     for attempt in range(3):
         try:
             hist = yf.Ticker(ticker).history(period="5d")
@@ -177,15 +215,12 @@ def get_price_momentum(ticker: str) -> dict:
             return {"pct": round(pct * 100, 2), "score": round(score, 4)}
         except Exception as e:
             if "database is locked" in str(e) and attempt < 2:
-                time.sleep(0.5)
+                time.sleep(0.1)
                 continue
-            print(f"  Momentum error for {ticker}: {e}")
+            print(f"  Momentum error {ticker}: {e}")
             return {"pct": 0.0, "score": 0.0}
 
-# ── Combined signal ──────────────────────────────────────────────────────────
-SENTIMENT_WEIGHT = 0.55
-MOMENTUM_WEIGHT  = 0.45
-
+# ── Step 5: Combined signal ───────────────────────────────────────────────────
 def combined_signal(sentiment_score: float, momentum_score: float) -> float:
     return round(
         SENTIMENT_WEIGHT * sentiment_score + MOMENTUM_WEIGHT * momentum_score, 4
@@ -231,13 +266,10 @@ HTML = """
     }
     .status-dot {
       width: 7px; height: 7px; border-radius: 50%;
-      background: var(--muted); flex-shrink: 0;
-      transition: background 0.3s;
+      background: var(--muted); flex-shrink: 0; transition: background 0.3s;
     }
     .status-dot.live { background: var(--bull); animation: pulse 1.5s infinite; }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
-    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     .legend {
       max-width: 480px; margin: 0 auto 20px;
       display: flex; gap: 16px; font-size: 0.68rem; color: var(--muted);
@@ -294,25 +326,20 @@ HTML = """
   <h1>Portfolio <span>Signal</span></h1>
   <p class="meta">FinBERT NLP · 5-day momentum · blended 55/45</p>
 </header>
-
 <div class="status">
   <div class="status-dot" id="status-dot"></div>
   <span id="status-text">Connecting...</span>
 </div>
-
 <div class="legend">
   <span><span class="legend-dot" style="background:var(--bull)"></span>Bullish ≥ 0.15</span>
   <span><span class="legend-dot" style="background:var(--neutral)"></span>Neutral</span>
   <span><span class="legend-dot" style="background:var(--bear)"></span>Bearish ≤ -0.15</span>
 </div>
-
 <div class="cards" id="cards"></div>
-
 <footer>
   Scores are informational only — not financial advice.<br/>
   <a href="/">Refresh</a> to pull latest data.
 </footer>
-
 <script>
   const dot    = document.getElementById('status-dot');
   const status = document.getElementById('status-text');
@@ -329,7 +356,9 @@ HTML = """
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-
+    if (msg.type === 'status') {
+      status.textContent = msg.message;
+    }
     if (msg.type === 'ticker_result') {
       const data = msg.data;
       status.textContent = `Analyzed ${data.ticker}...`;
@@ -343,12 +372,14 @@ HTML = """
         </div>
         <div class="sub-row">
           <span>NLP <strong>${data.sent_score}</strong></span>
-          <span>5d momentum <strong style="color:${data.mom_pct >= 0 ? 'var(--bull)' : 'var(--bear)'}">${data.mom_pct >= 0 ? '+' : ''}${data.mom_pct}%</strong></span>
+          <span>5d <strong style="color:${data.mom_pct>=0?'var(--bull)':'var(--bear)'}">
+            ${data.mom_pct>=0?'+':''}${data.mom_pct}%
+          </strong></span>
         </div>
         <div class="bar-track">
-          <div class="bar-fill" style="width:${bar}%; background:${data.color}44; border:1px solid ${data.color};"></div>
+          <div class="bar-fill" style="width:${bar}%;background:${data.color}44;border:1px solid ${data.color};"></div>
         </div>
-        <span class="badge" style="background:${data.color}18; color:${data.color};">
+        <span class="badge" style="background:${data.color}18;color:${data.color};">
           <span class="badge-dot" style="background:${data.color}"></span>
           ${data.sentiment}
         </span>
@@ -357,19 +388,16 @@ HTML = """
       cards.appendChild(card);
       requestAnimationFrame(() => card.classList.add('visible'));
     }
-
     if (msg.type === 'analysis_complete') {
       dot.classList.remove('live');
       status.textContent = 'Analysis complete';
       const allCards = [...cards.querySelectorAll('.card')];
-      allCards.sort((a, b) => {
-        const scoreA = parseFloat(a.querySelector('.final-score').textContent);
-        const scoreB = parseFloat(b.querySelector('.final-score').textContent);
-        return scoreB - scoreA;
-      });
+      allCards.sort((a, b) =>
+        parseFloat(b.querySelector('.final-score').textContent) -
+        parseFloat(a.querySelector('.final-score').textContent)
+      );
       allCards.forEach(c => cards.appendChild(c));
     }
-
     if (msg.type === 'error') {
       dot.style.background = 'var(--bear)';
       status.textContent = `Error: ${msg.message}`;
@@ -409,7 +437,8 @@ async def index(auth_token: str = Cookie(None)):
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
-    t_start = time.time()
+
+    # Auth check
     token = ws.cookies.get("auth_token")
     if not token or not _verify_jwt(token):
         await ws.send_json({"type": "error", "message": "Session expired. Please refresh."})
@@ -423,43 +452,93 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception:
         return
 
+    # Per-user cache check
     ckey       = _cache_key(token)
     user_cache = _caches.get(ckey, {"data": None, "ts": 0})
-
     if user_cache["data"] and (time.time() - user_cache["ts"]) < CACHE_TTL:
         print(f"Serving from cache [{ckey}]")
         for row in user_cache["data"]:
             await ws.send_json({"type": "ticker_result", "data": row})
+            await asyncio.sleep(0.1)
         await ws.send_json({"type": "analysis_complete"})
         return
+    # ── Total timer ───────────────────────────────────────────────────────────
+    t_total = time.time()
 
+    # Login
     try:
+        t0 = time.time()
         await login_to_robinhood()
+        print(f"[TIMER] login:           {time.time()-t0:.2f}s")
     except Exception as e:
         await ws.send_json({"type": "error", "message": str(e)})
         return
 
+    # Fetch holdings
+    t0       = time.time()
     loop     = asyncio.get_event_loop()
     holdings = await loop.run_in_executor(None, rh.account.build_holdings)
+    print(f"[TIMER] build_holdings:  {time.time()-t0:.2f}s  ({len(holdings)} tickers)")
     if not holdings:
         await ws.send_json({"type": "error", "message": "No holdings found."})
         return
 
-    def analyze_ticker(ticker):
-        t0 = time.time()
-        sent_score = get_finbert_sentiment(ticker)
-        t1 = time.time()
-        mom        = get_price_momentum(ticker)
-        t2 = time.time()
-        print(f"{ticker}: sentiment={t1-t0:.2f}s momentum={t2-t1:.2f}s total={t2-t0:.2f}s")
+    tickers = list(holdings.keys())
 
-        final      = combined_signal(sent_score, mom["score"])
+    # ── Step 1: Collect all news in parallel ─────────────────────────────────
+    t0 = time.time()
+    await ws.send_json({"type": "status", "message": "Fetching news..."})
+    news_by_ticker = await loop.run_in_executor(
+        _executor, collect_news, tickers
+    )
+    total_items = sum(len(v) for v in news_by_ticker.values())
+    print(f"[TIMER] collect_news:    {time.time()-t0:.2f}s  ({total_items} items across {len(tickers)} tickers)")
+
+    # ── Step 2: Deduplicate headlines ─────────────────────────────────────────
+    t0 = time.time()
+    unique_headlines = list({
+        title
+        for items in news_by_ticker.values()
+        for item in items
+        for title in [
+            item.get("title")
+            or item.get("content", {}).get("title")
+            or ""
+        ]
+        if title
+    })
+    print(f"[TIMER] deduplicate:     {time.time()-t0:.2f}s  ({total_items} → {len(unique_headlines)} unique headlines)")
+    print(f"Scoring {len(unique_headlines)} unique headlines in one batch...")
+
+    # ── Step 3: One HuggingFace batch call ────────────────────────────────────
+    t0 = time.time()
+    await ws.send_json({"type": "status", "message": f"Scoring {len(unique_headlines)} headlines..."})
+    headline_scores = await loop.run_in_executor(
+        _executor, batch_score_finbert, unique_headlines
+    )
+    print(f"[TIMER] batch_finbert:   {time.time()-t0:.2f}s  ({len(headline_scores)} headlines scored)")
+
+    # ── Step 4: Analyze each ticker (momentum + score) in parallel ────────────
+    def analyze_ticker(ticker):
+        t_sent = time.time()
+        sent_score = compute_ticker_score(
+            news_by_ticker.get(ticker, []),
+            headline_scores
+        )
+        t_mom = time.time()
+        mom   = get_price_momentum(ticker)
+        t_end = time.time()
+        print(f"[TIMER]   {ticker}: sentiment={t_mom-t_sent:.2f}s momentum={t_end-t_mom:.2f}s total={t_end-t_sent:.2f}s")
+
+        final = combined_signal(sent_score, mom["score"])
+
         if final >= 0.15:
             sentiment, action, color, tier = "Bullish",  "HODL / Accumulate",       "#22c55e", "bull"
         elif final <= -0.15:
             sentiment, action, color, tier = "Bearish",  "Review Sell / Stop-Loss", "#ef4444", "bear"
         else:
             sentiment, action, color, tier = "Neutral",  "Maintain Position",       "#f59e0b", "neutral"
+
         return {
             "ticker":      ticker,
             "sentiment":   sentiment,
@@ -471,11 +550,14 @@ async def websocket_endpoint(ws: WebSocket):
             "final_score": final,
         }
 
-    results = []
-    tasks   = [
+    # Run all ticker analyses concurrently
+    t0    = time.time()
+    tasks = [
         loop.run_in_executor(_executor, analyze_ticker, ticker)
-        for ticker in holdings.keys()
+        for ticker in tickers
     ]
+
+    results = []
     for coro in asyncio.as_completed(tasks):
         try:
             row = await coro
@@ -484,10 +566,19 @@ async def websocket_endpoint(ws: WebSocket):
             await asyncio.sleep(0.1)
         except Exception as e:
             print(f"  Error: {e}")
+    print(f"[TIMER] all_tickers:     {time.time()-t0:.2f}s")
+    # ── Streaming delay ───────────────────────────────────────────────────────
+    t_stream = len(results) * 0.1
+    print(f"[TIMER] streaming delay: ~{t_stream:.1f}s  ({len(results)} cards × 0.1s)")
 
+    # ── Summary ───────────────────────────────────────────────────────────────
+    t_elapsed = time.time() - t_total
+    print(f"[TIMER] ─────────────────────────────────")
+    print(f"[TIMER] TOTAL:           {t_elapsed:.2f}s")
+
+    # Cache and complete
     _caches[ckey] = {"data": results, "ts": time.time()}
     await ws.send_json({"type": "analysis_complete"})
-    print(f"Total analysis time: {time.time() - t_start:.2f}s")
 
 
 if __name__ == "__main__":
@@ -495,9 +586,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8082))
 
     if sys.platform == "darwin":
-        # macOS Python 3.9: kqueue selector is buggy.
-        # Bypass uvicorn's loop creation — run server.serve() in our own
-        # SelectSelector-based loop so kqueue is never touched.
         import selectors
 
         async def _serve():
