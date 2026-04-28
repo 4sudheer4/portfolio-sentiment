@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import secrets
 import sys
@@ -7,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import jwt
+import redis
 import requests
 import robin_stocks.robinhood as rh
 import yfinance as yf
@@ -33,12 +35,16 @@ LABEL_TO_SCORE   = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
 SENTIMENT_WEIGHT = 0.55
 MOMENTUM_WEIGHT  = 0.45
 
-# ── Cache — keyed by md5(jwt_token)[:8] ──────────────────────────────────────
-_caches    = {}
-_logged_in = False
-_login_lock = None
-CACHE_TTL  = 1800
 JWT_EXPIRY = 86400
+CACHE_TTL  = 1800   # per-user analysis cache (s)
+LOGIN_TTL  = 3600   # rh:logged_in key TTL (s)
+LOCK_TTL   = 30     # rh:login_lock TTL — auto-expires if server crashes (s)
+
+# ── Redis client ──────────────────────────────────────────────────────────────
+_redis = redis.from_url(
+    os.getenv("REDIS_URL", "redis://localhost:6379"),
+    decode_responses=True
+)
 
 # ── Thread pool ───────────────────────────────────────────────────────────────
 _executor = ThreadPoolExecutor(max_workers=20)
@@ -70,18 +76,32 @@ def _do_rh_login():
     rh.login(username, password, store_session=True)
 
 async def login_to_robinhood():
-    global _logged_in, _login_lock
-    if _logged_in:
+    # Fast path — already logged in
+    if _redis.get("rh:logged_in"):
         return
-    if _login_lock is None:
-        _login_lock = asyncio.Lock()
-    async with _login_lock:
-        if _logged_in:
-            return
+
+    # SETNX — only one worker wins the lock
+    acquired = _redis.set("rh:login_lock", "1", nx=True, ex=LOCK_TTL)
+    if not acquired:
+        # Another worker is logging in — poll until done
+        for _ in range(15):
+            await asyncio.sleep(1)
+            if _redis.get("rh:logged_in"):
+                return
+        raise Exception("Login lock timeout — Robinhood login took too long")
+
+    # Double-check after acquiring
+    if _redis.get("rh:logged_in"):
+        _redis.delete("rh:login_lock")
+        return
+
+    try:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _do_rh_login)
-        _logged_in = True
+        _redis.setex("rh:logged_in", LOGIN_TTL, "1")
         print("Logged into Robinhood.")
+    finally:
+        _redis.delete("rh:login_lock")
 
 # ── Step 1: Collect full news items per ticker ────────────────────────────────
 def collect_news(tickers: list) -> dict:
@@ -420,6 +440,18 @@ HTML = """
 </html>
 """
 
+# ── Startup pre-warm ─────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup():
+    try:
+        await login_to_robinhood()
+        loop     = asyncio.get_event_loop()
+        holdings = await loop.run_in_executor(None, rh.account.build_holdings)
+        _redis.setex("rh:holdings", 600, json.dumps(list(holdings.keys())))
+        print(f"Startup: pre-warmed {len(holdings)} tickers")
+    except Exception as e:
+        print(f"Startup warm-up failed (non-fatal): {e}")
+
 # ── HTTP route ────────────────────────────────────────────────────────────────
 @app.get("/")
 async def index(auth_token: str = Cookie(None)):
@@ -453,15 +485,16 @@ async def websocket_endpoint(ws: WebSocket):
         return
 
     # Per-user cache check
-    ckey       = _cache_key(token)
-    user_cache = _caches.get(ckey, {"data": None, "ts": 0})
-    if user_cache["data"] and (time.time() - user_cache["ts"]) < CACHE_TTL:
-        print(f"Serving from cache [{ckey}]")
-        for row in user_cache["data"]:
+    ckey   = f"cache:{_cache_key(token)}"
+    cached = _redis.get(ckey)
+    if cached:
+        print(f"[CACHE] hit [{ckey}]")
+        for row in json.loads(cached):
             await ws.send_json({"type": "ticker_result", "data": row})
             await asyncio.sleep(0.1)
         await ws.send_json({"type": "analysis_complete"})
         return
+    print(f"[CACHE] miss [{ckey}]")
     # ── Total timer ───────────────────────────────────────────────────────────
     t_total = time.time()
 
@@ -577,7 +610,7 @@ async def websocket_endpoint(ws: WebSocket):
     print(f"[TIMER] TOTAL:           {t_elapsed:.2f}s")
 
     # Cache and complete
-    _caches[ckey] = {"data": results, "ts": time.time()}
+    _redis.setex(ckey, CACHE_TTL, json.dumps(results))
     await ws.send_json({"type": "analysis_complete"})
 
 
