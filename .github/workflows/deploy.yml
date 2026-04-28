@@ -28,6 +28,7 @@ jobs:
             docker run -d \
               -p 8082:5000 \
               --env-file .env \
+              --add-host=host.docker.internal:host-gateway \
               --name sentiment-app \
               --restart always \
               sentiment-app
