@@ -22,8 +22,11 @@ jobs:
           script: |
             cd /home/ubuntu/portfolio-sentiment
             git pull origin main
-            
-            # Use old docker-compose syntax for older Docker versions
+
+            # Stop any stale standalone containers that may hold ports
+            docker stop redis postgres sentiment-app 2>/dev/null || true
+            docker rm   redis postgres sentiment-app 2>/dev/null || true
+
             docker-compose down || true
             docker-compose build app
             docker-compose up -d
