@@ -20,8 +20,13 @@ jobs:
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            # Install Docker Compose plugin if missing
+            if ! docker compose version &>/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq docker-compose-plugin
+            fi
             cd portfolio-sentiment
             git pull
-            docker-compose down --remove-orphans
-            docker-compose build app
-            docker-compose up -d
+            docker compose down --remove-orphans
+            docker compose build app
+            docker compose up -d
