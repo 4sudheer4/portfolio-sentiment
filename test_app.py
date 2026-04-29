@@ -11,7 +11,7 @@ def debug_momentum(ticker: str):
     hist_raw = stock.history(period="5d", interval="1d", prepost=False)
     print(f"\n[1] Raw yfinance rows (period=5d):")
     print(hist_raw[["Open", "Close", "Volume"]])
-    print(f"Total rows: {len(hist_raw)}")
+    
 
     # After volume filter
     hist_clean = hist_raw[hist_raw["Volume"] > 0]
