@@ -7,6 +7,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import asyncpg
 import jwt
 import redis
 import requests
@@ -14,7 +15,7 @@ import robin_stocks.robinhood as rh
 import yfinance as yf
 from dotenv import load_dotenv
 from fastapi import Cookie, FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 # Prevent yfinance SQLite lock conflicts with threading
 try:
@@ -45,6 +46,9 @@ _redis = redis.from_url(
     os.getenv("REDIS_URL", "redis://localhost:6379"),
     decode_responses=True
 )
+
+# ── DB pool ───────────────────────────────────────────────────────────────────
+_db_pool = None  # asyncpg.Pool — set on startup
 
 # ── Thread pool ───────────────────────────────────────────────────────────────
 _executor = ThreadPoolExecutor(max_workers=20)
@@ -124,6 +128,7 @@ def collect_news(tickers: list) -> dict:
         for future in as_completed(futures):
             ticker, news = future.result()
             result[ticker] = news
+    print(f"[DEBUG] News collected: {[(t, len(items)) for t, items in result.items()]}")
     return result
 
 
@@ -154,6 +159,8 @@ def batch_score_finbert(headlines: list) -> dict:
                 continue
 
             results = response.json()
+            print(f"[DEBUG] HF raw results type: {type(results)}")
+            print(f"[DEBUG] First result sample: {results[0] if results else 'None'}")
 
             # Model still loading — HF returns {"error": ..., "estimated_time": N}
             if isinstance(results, dict) and "error" in results:
@@ -166,11 +173,10 @@ def batch_score_finbert(headlines: list) -> dict:
             # results = [[{label, score}, ...], [...], [...]]
             # One inner list per headline, in same order as input
             scores = {}
-            for headline, label_list in zip(headlines, results):
-                if isinstance(label_list, list):
-                    best   = max(label_list, key=lambda x: x["score"])
-                    label  = best["label"].lower()
-                    conf   = best["score"]
+            for headline, result in zip(headlines, results):
+                if isinstance(result, dict) and 'label' in result:
+                    label = result["label"].lower()
+                    conf  = result["score"]
                     scores[headline] = LABEL_TO_SCORE.get(label, 0.0) * conf
                 else:
                     scores[headline] = 0.0
@@ -199,25 +205,32 @@ def compute_ticker_score(news_items: list, headline_scores: dict) -> float:
     now          = time.time()
     weighted_sum = 0.0
     weight_total = 0.0
-
+    print(f"[DEBUG] compute_ticker_score: {len(news_items)} news items")
+    print(f"[DEBUG] headline_scores has {len(headline_scores)} entries")
+    matched_count = 0
     for item in news_items:
         title = (
             item.get("title")
             or item.get("content", {}).get("title")
             or ""
         )
+        print(f"[DEBUG] News title: '{title}'")
+        print(f"[DEBUG] Title in scores: {title in headline_scores}")
+
         if not title or title not in headline_scores:
             continue
-
+        matched_count += 1
         pub_time       = item.get("providerPublishTime") or now
         age_seconds    = max(now - pub_time, 0)
         recency_weight = 0.5 ** (age_seconds / 259200)
         score          = headline_scores[title]
-
+        print(f"[DEBUG] Matched title score: {score}, weight: {recency_weight}")
         weighted_sum  += score * recency_weight
         weight_total  += recency_weight
 
-    return round(weighted_sum / weight_total, 4) if weight_total else 0.0
+    final_score = round(weighted_sum / weight_total, 4) if weight_total else 0.0
+    print(f"[DEBUG] Final ticker score: {final_score} (matched {matched_count} titles)")
+    return final_score
 
 # ── Step 4: Price momentum ────────────────────────────────────────────────────
 def get_price_momentum(ticker: str) -> dict:
@@ -440,9 +453,52 @@ HTML = """
 </html>
 """
 
-# ── Startup pre-warm ─────────────────────────────────────────────────────────
+# ── DB helpers ────────────────────────────────────────────────────────────────
+async def _init_db_pool():
+    global _db_pool
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        print("DATABASE_URL not set — skipping PostgreSQL init")
+        return
+    try:
+        _db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=5)
+        print("PostgreSQL pool created.")
+    except Exception as e:
+        print(f"PostgreSQL unavailable — skipping (non-fatal): {e}")
+
+async def store_analysis_with_history(
+    token: str,
+    tickers: list,
+    results: list,
+    duration_seconds: int,
+):
+    """Dual-write: Redis cache + PostgreSQL permanent history."""
+    ckey = f"cache:{_cache_key(token)}"
+    _redis.setex(ckey, CACHE_TTL, json.dumps(results))
+
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO analyses
+                    (user_token_hash, tickers, results, analysis_duration_seconds)
+                VALUES ($1, $2, $3, $4)
+                """,
+                _cache_key(token),
+                tickers,
+                json.dumps(results),
+                duration_seconds,
+            )
+    except Exception as e:
+        print(f"[DB] store error (non-fatal): {e}")
+
+# ── Startup / shutdown ────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
+    await _init_db_pool()
+    _redis.delete("rh:logged_in")   # clear stale key — fresh container needs fresh login
     try:
         await login_to_robinhood()
         loop     = asyncio.get_event_loop()
@@ -451,6 +507,12 @@ async def startup():
         print(f"Startup: pre-warmed {len(holdings)} tickers")
     except Exception as e:
         print(f"Startup warm-up failed (non-fatal): {e}")
+
+@app.on_event("shutdown")
+async def shutdown():
+    if _db_pool:
+        await _db_pool.close()
+        print("PostgreSQL pool closed.")
 
 # ── HTTP route ────────────────────────────────────────────────────────────────
 @app.get("/")
@@ -464,6 +526,96 @@ async def index(auth_token: str = Cookie(None)):
             max_age=JWT_EXPIRY
         )
     return response
+
+# ── History API ───────────────────────────────────────────────────────────────
+@app.get("/api/history")
+async def api_history(auth_token: str = Cookie(None), limit: int = 10):
+    """Last N analyses for the current user."""
+    if not auth_token or not _verify_jwt(auth_token):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if _db_pool is None:
+        return JSONResponse({"error": "Database not available"}, status_code=503)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, created_at, tickers, results, analysis_duration_seconds
+            FROM analyses
+            WHERE user_token_hash = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            _cache_key(auth_token),
+            limit,
+        )
+    return JSONResponse([
+        {
+            "id":       r["id"],
+            "created_at": r["created_at"].isoformat(),
+            "tickers":  r["tickers"],
+            "results":  json.loads(r["results"]),
+            "duration": r["analysis_duration_seconds"],
+        }
+        for r in rows
+    ])
+
+@app.get("/api/trends/{ticker}")
+async def api_trends(ticker: str, auth_token: str = Cookie(None), limit: int = 30):
+    """Score history for one ticker across past runs for the current user."""
+    if not auth_token or not _verify_jwt(auth_token):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if _db_pool is None:
+        return JSONResponse({"error": "Database not available"}, status_code=503)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT created_at,
+                   elem->>'final_score'  AS final_score,
+                   elem->>'sentiment'    AS sentiment
+            FROM analyses,
+                 jsonb_array_elements(results) AS elem
+            WHERE user_token_hash = $1
+              AND elem->>'ticker' = $2
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            _cache_key(auth_token),
+            ticker.upper(),
+            limit,
+        )
+    return JSONResponse([
+        {
+            "created_at":  r["created_at"].isoformat(),
+            "final_score": float(r["final_score"]),
+            "sentiment":   r["sentiment"],
+        }
+        for r in rows
+    ])
+
+@app.get("/api/stats")
+async def api_stats(auth_token: str = Cookie(None)):
+    """Aggregate stats for the current user."""
+    if not auth_token or not _verify_jwt(auth_token):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if _db_pool is None:
+        return JSONResponse({"error": "Database not available"}, status_code=503)
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(*)                                   AS total_runs,
+                   MIN(created_at)                           AS first_run,
+                   MAX(created_at)                           AS last_run,
+                   ROUND(AVG(analysis_duration_seconds), 1)  AS avg_duration
+            FROM analyses
+            WHERE user_token_hash = $1
+            """,
+            _cache_key(auth_token),
+        )
+    return JSONResponse({
+        "total_runs":   row["total_runs"],
+        "first_run":    row["first_run"].isoformat() if row["first_run"] else None,
+        "last_run":     row["last_run"].isoformat() if row["last_run"] else None,
+        "avg_duration": float(row["avg_duration"]) if row["avg_duration"] else None,
+    })
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
 @app.websocket("/ws")
@@ -553,11 +705,15 @@ async def websocket_endpoint(ws: WebSocket):
 
     # ── Step 4: Analyze each ticker (momentum + score) in parallel ────────────
     def analyze_ticker(ticker):
+        print(f"[DEBUG] Starting analysis for ticker: {ticker}")
+    
         t_sent = time.time()
-        sent_score = compute_ticker_score(
-            news_by_ticker.get(ticker, []),
-            headline_scores
-        )
+        news_items = news_by_ticker.get(ticker, [])
+        print(f"[DEBUG] {ticker} has {len(news_items)} news items")
+
+        sent_score = compute_ticker_score(news_items, headline_scores)
+        print(f"[DEBUG] {ticker} computed sentiment score: {sent_score}")
+        
         t_mom = time.time()
         mom   = get_price_momentum(ticker)
         t_end = time.time()
@@ -609,8 +765,9 @@ async def websocket_endpoint(ws: WebSocket):
     print(f"[TIMER] ─────────────────────────────────")
     print(f"[TIMER] TOTAL:           {t_elapsed:.2f}s")
 
-    # Cache and complete
-    _redis.setex(ckey, CACHE_TTL, json.dumps(results))
+    # Dual-write: Redis cache + PostgreSQL history
+    duration = int(time.time() - t_total)
+    await store_analysis_with_history(token, tickers, results, duration)
     await ws.send_json({"type": "analysis_complete"})
 
 
