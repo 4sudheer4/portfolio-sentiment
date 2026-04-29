@@ -10,7 +10,7 @@ def debug_momentum(ticker: str):
     # Raw fetch
     hist_raw = stock.history(period="5d", interval="1d", prepost=False)
     print(f"\n[1] Raw yfinance rows (period=5d):")
-    print(hist_raw[["Open", "Close", "Volume"]])
+    #print(hist_raw[["Open", "Close", "Volume"]])
     
 
     # After volume filter
