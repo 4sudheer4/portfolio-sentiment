@@ -22,6 +22,6 @@ jobs:
           script: |
             cd portfolio-sentiment
             git pull
-            docker compose down --remove-orphans
-            docker compose build app
-            docker compose up -d
+            docker-compose down --remove-orphans
+            docker-compose build app
+            docker-compose up -d
