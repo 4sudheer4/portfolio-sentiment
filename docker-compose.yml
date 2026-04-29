@@ -4,7 +4,7 @@ services:
     container_name: redis
     restart: always
     ports:
-      - "127.0.0.1:6379:6379"   # localhost only — not exposed publicly
+      - "127.0.0.1:6380:6379"   # localhost only — not exposed publicly
     command: redis-server --save "" --appendonly no  # no persistence — cache only
 
   postgres:
