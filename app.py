@@ -160,7 +160,8 @@ def batch_score_finbert(headlines: list) -> dict:
 
             results = response.json()
             print(f"[DEBUG] HF raw results type: {type(results)}")
-            print(f"[DEBUG] First result sample: {results[0] if results else 'None'}")
+            #print(f"[DEBUG] First result sample: {results[0] if results else 'None'}")
+            print(f"[DEBUG] First result sample: {results[0][0] if results else 'None'}")
 
             # Model still loading — HF returns {"error": ..., "estimated_time": N}
             if isinstance(results, dict) and "error" in results:
@@ -168,12 +169,16 @@ def batch_score_finbert(headlines: list) -> dict:
                 print(f"  HF model loading, waiting {wait}s...")
                 time.sleep(wait)
                 continue
-
+            # The results are nested - get the actual list
+            if isinstance(results, list) and len(results) > 0:
+                actual_results = results[0]  # Get the first (and only) element which contains all results
+            else:
+                return {h: 0.0 for h in headlines}
             # Parse batch results
             # results = [[{label, score}, ...], [...], [...]]
             # One inner list per headline, in same order as input
             scores = {}
-            for headline, result in zip(headlines, results):
+            for headline, result in zip(headlines, actual_results):
                 if isinstance(result, dict) and 'label' in result:
                     label = result["label"].lower()
                     conf  = result["score"]
@@ -214,7 +219,7 @@ def compute_ticker_score(news_items: list, headline_scores: dict) -> float:
             # Show the closest match
             close_matches = [k for k in headline_scores.keys() if title[:50] in k or k[:50] in title]
             print(f"[DEBUG] Close matches: {close_matches[:2]}")
-            
+
     now          = time.time()
     weighted_sum = 0.0
     weight_total = 0.0

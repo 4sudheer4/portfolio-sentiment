@@ -7,6 +7,25 @@ services:
       - "127.0.0.1:6379:6379"   # localhost only — not exposed publicly
     command: redis-server --save "" --appendonly no  # no persistence — cache only
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: always
+    ports:
+      - "127.0.0.1:5434:5432"   # localhost only — not exposed publicly
+    environment:
+      POSTGRES_DB: sentiment
+      POSTGRES_USER: sentiment
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # persist across restarts
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # run schema on first start
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentiment -d sentiment"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   app:
     build: .
     container_name: sentiment-app
@@ -15,6 +34,13 @@ services:
       - "8082:5000"
     env_file: .env
     environment:
-      - REDIS_URL=redis://redis:6379  # uses Docker service name
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://sentiment:${POSTGRES_PASSWORD}@postgres:5432/sentiment
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

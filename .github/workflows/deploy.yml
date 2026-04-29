@@ -22,13 +22,6 @@ jobs:
           script: |
             cd portfolio-sentiment
             git pull
-            docker stop sentiment-app || true
-            docker rm sentiment-app || true
-            docker build -t sentiment-app .
-            docker run -d \
-              -p 8082:5000 \
-              --env-file .env \
-              --add-host=host.docker.internal:host-gateway \
-              --name sentiment-app \
-              --restart always \
-              sentiment-app
+            docker compose down --remove-orphans
+            docker compose build app
+            docker compose up -d
