@@ -202,6 +202,19 @@ def compute_ticker_score(news_items: list, headline_scores: dict) -> float:
 
     Returns weighted average in [-1, 1]
     """
+    for item in news_items:
+        title = (
+            item.get("title")
+            or item.get("content", {}).get("title")
+            or ""
+        )
+        print(f"[DEBUG] Extracted title: '{title}'")
+        print(f"[DEBUG] Available in scores: {title in headline_scores}")
+        if title and title not in headline_scores:
+            # Show the closest match
+            close_matches = [k for k in headline_scores.keys() if title[:50] in k or k[:50] in title]
+            print(f"[DEBUG] Close matches: {close_matches[:2]}")
+            
     now          = time.time()
     weighted_sum = 0.0
     weight_total = 0.0
@@ -692,6 +705,9 @@ async def websocket_endpoint(ws: WebSocket):
         ]
         if title
     })
+    print(f"[DEBUG] Sample unique headlines sent to HF:")
+    for i, h in enumerate(unique_headlines[:3]):
+        print(f"  {i}: '{h}'")
     print(f"[TIMER] deduplicate:     {time.time()-t0:.2f}s  ({total_items} → {len(unique_headlines)} unique headlines)")
     print(f"Scoring {len(unique_headlines)} unique headlines in one batch...")
 
@@ -713,7 +729,7 @@ async def websocket_endpoint(ws: WebSocket):
 
         sent_score = compute_ticker_score(news_items, headline_scores)
         print(f"[DEBUG] {ticker} computed sentiment score: {sent_score}")
-        
+
         t_mom = time.time()
         mom   = get_price_momentum(ticker)
         t_end = time.time()
